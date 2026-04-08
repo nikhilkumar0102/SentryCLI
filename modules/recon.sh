@@ -1,425 +1,323 @@
 #!/usr/bin/env bash
 # =============================================================================
-# SentryCLI - Reconnaissance Module
+# SentryCLI - Reconnaissance Module (Clean & Professional Output)
 # modules/recon.sh
-#
-# Target enumeration: nmap port scan, DNS, WHOIS, HTTP probe, subdomains.
 # =============================================================================
 
 run_recon() {
     local target="${1:-}"
-
-    print_section "RECONNAISSANCE"
+    print_section "RECONNAISSANCE MODULE"
     log_info "RECON" "Module started"
 
     if [[ -z "$target" ]]; then
-        echo -ne "  ${CYAN}${BOLD}Enter target (IP or domain):${RESET} "
+        echo -ne " ${CYAN}${BOLD}Enter target (IP or domain): ${RESET}"
         read -r target
     fi
 
-    if [[ -z "$target" ]]; then
-        print_alert "No target specified. Aborting."
-        log_error "RECON" "No target specified"
-        return 1
-    fi
+    [[ -z "$target" ]] && { print_alert "No target specified. Aborting."; return 1; }
 
-    # Sanitize
+    # Sanitize target
     target=$(echo "$target" | tr -d '[:space:]' | sed 's|https\?://||g' | cut -d'/' -f1)
 
     echo ""
-    print_kv "Target"  "$target"
+    print_kv "Target" "$target"
     print_kv "Started" "$(date '+%Y-%m-%d %H:%M:%S')"
-    echo ""
-
-    log_info "RECON" "Target: $target"
+    echo "────────────────────────────────────────────────────────────"
 
     local report
     report=$(report_init "recon_${target//[^a-zA-Z0-9._-]/_}")
     report_section "$report" "Reconnaissance: $target"
-    report_append  "$report" "Target : $target"
-    report_append  "$report" "Started: $(date)"
+    report_append "$report" "Target : $target"
+    report_append "$report" "Started: $(date)"
 
     _recon_check_tools
-    _recon_dns         "$target" "$report"
-    _recon_whois       "$target" "$report"
-    _recon_portscan    "$target" "$report"
-    _recon_http_probe  "$target" "$report"
+    _recon_dns "$target" "$report"
+    _recon_whois "$target" "$report"
+    _recon_portscan "$target" "$report"
+    _recon_http_probe "$target" "$report"
     _recon_subdomain_hints "$target" "$report"
 
-    echo ""
     report_finalize "$report"
-    log_success "RECON" "Complete for $target. Report: $report"
+    log_success "RECON" "Reconnaissance complete for $target"
 }
 
-# ── Tool Check ────────────────────────────────────────────────────────────────
+# ── Tool Availability ───────────────────────────────────────────────────────
 _recon_check_tools() {
     print_subsection "Tool Availability"
-
-    local tools=("nmap" "whois" "dig" "host" "curl" "traceroute")
-    local missing=()
-
+    local tools=("nmap" "whois" "dig" "curl")
     for tool in "${tools[@]}"; do
         if command -v "$tool" &>/dev/null; then
-            printf "    ${GREEN}✔${RESET}  ${DIM}%-14s${RESET} available\n" "$tool"
+            printf " ${GREEN}✔${RESET} %-12s ${GREEN}available${RESET}\n" "$tool"
         else
-            printf "    ${YELLOW}⚠${RESET}  ${DIM}%-14s${RESET} ${YELLOW}not found${RESET}\n" "$tool"
-            missing+=("$tool")
+            printf " ${YELLOW}⚠${RESET} %-12s ${YELLOW}missing${RESET}\n" "$tool"
         fi
     done
-
-    if [[ ${#missing[@]} -gt 0 ]]; then
-        echo ""
-        print_info "Install missing: sudo apt install ${missing[*]}"
-    fi
+    echo ""
 }
 
-# ── DNS Enumeration ───────────────────────────────────────────────────────────
+# ── DNS Records - Clean Tabular Output ──────────────────────────────────────
 _recon_dns() {
     local target="$1"
     local report="$2"
 
     print_subsection "DNS Records"
     report_section "$report" "DNS Records"
-    log_info "RECON" "DNS lookup: $target"
 
     if ! command -v dig &>/dev/null; then
-        print_warn "dig not available — skipping DNS"
+        print_warn "dig not available — skipping DNS enumeration"
         return
     fi
 
+    echo ""
+    printf "${BOLD}%-8s  %s${RESET}\n" "TYPE" "VALUE"
+    echo "────────────────────────────────────────────────────────────"
+
     local record_types=("A" "AAAA" "MX" "NS" "TXT" "CNAME" "SOA")
+    local has_records=0
 
     for rtype in "${record_types[@]}"; do
         local result
         result=$(dig +short "$rtype" "$target" 2>/dev/null)
+
         if [[ -n "$result" ]]; then
-            print_kv "  $rtype" "$result"
-            report_append "$report" "$rtype : $result"
+            has_records=1
+            while IFS= read -r line; do
+                [[ -z "$line" ]] && continue
+                # Clean dig noise and extra spaces
+                line=$(echo "$line" | sed 's/;;.*//g' | sed 's/^[[:space:]]*//' | tr -d '\r')
+                [[ -z "$line" ]] && continue
+
+                printf "%-8s  %s\n" "$rtype" "$line"
+                report_append "$report" "${rtype} : $line"
+            done <<< "$result"
         fi
     done
 
+    # PTR (Reverse DNS)
     local ip
     ip=$(dig +short A "$target" 2>/dev/null | head -1)
     if [[ -n "$ip" ]]; then
         local rdns
-        rdns=$(dig +short -x "$ip" 2>/dev/null)
-        print_kv "  PTR ($ip)" "${rdns:-no reverse DNS}"
-        report_append "$report" "PTR ($ip) : ${rdns:-N/A}"
+        rdns=$(dig +short -x "$ip" 2>/dev/null | sed 's/\.$//' | head -1)
+        if [[ -n "$rdns" ]]; then
+            printf "%-8s  %s (%s)\n" "PTR" "$rdns" "$ip"
+            report_append "$report" "PTR : $rdns ($ip)"
+        else
+            printf "%-8s  %s (%s)\n" "PTR" "No reverse DNS" "$ip"
+            report_append "$report" "PTR : No reverse DNS ($ip)"
+        fi
+        has_records=1
     fi
+
+    if [[ $has_records -eq 0 ]]; then
+        print_warn "No DNS records found for this target"
+    fi
+
+    echo ""
 }
 
-# ── WHOIS Lookup ──────────────────────────────────────────────────────────────
+# ── WHOIS Information ───────────────────────────────────────────────────────
 _recon_whois() {
     local target="$1"
     local report="$2"
 
-    print_subsection "WHOIS"
+    print_subsection "WHOIS Information"
     report_section "$report" "WHOIS Data"
-    log_info "RECON" "WHOIS: $target"
 
     if ! command -v whois &>/dev/null; then
-        print_warn "whois not available — skipping"
+        print_warn "whois command not available"
         return
     fi
 
-    local whois_data
-    whois_data=$(whois "$target" 2>/dev/null | grep -v "^%" | grep -v "^#" | grep -v "^$")
+    print_info "Fetching WHOIS data..."
+    local whois_data=$(whois "$target" 2>/dev/null | grep -Ev '^(%|#|^$|^\s*$)' | head -40)
 
     if [[ -z "$whois_data" ]]; then
-        print_warn "No WHOIS data returned"
+        print_warn "No WHOIS data returned or query limited"
         return
     fi
 
-    local fields=(
-        "Registrar:"
-        "Registrant Organization:"
-        "Registrant Country:"
-        "Creation Date:"
-        "Registry Expiry Date:"
-        "Name Server:"
-        "OrgName:"
-        "NetRange:"
-        "CIDR:"
-        "Country:"
-    )
-
-    for field in "${fields[@]}"; do
-        local value
-        value=$(echo "$whois_data" | grep -i "^${field}" | head -1 | cut -d':' -f2- | sed 's/^ *//')
-        if [[ -n "$value" ]]; then
-            print_kv "  ${field%:}" "$value"
-            report_append "$report" "${field%:} : $value"
-        fi
+    echo "$whois_data" | while IFS= read -r line; do
+        echo -e "   ${DIM}$line${RESET}"
     done
+    echo ""
 
     echo "$whois_data" >> "$report"
 }
 
-# ── Port Scanning ─────────────────────────────────────────────────────────────
+# ── Clean Tabular Port Scan ─────────────────────────────────────────────────
 _recon_portscan() {
     local target="$1"
     local report="$2"
 
-    print_subsection "Port Scan  (nmap -sV -sC --open -T4)"
+    print_subsection "Port Scan + Service & OS Detection"
     report_section "$report" "Port Scan Results"
-    log_info "RECON" "Starting port scan: $target"
 
     if ! command -v nmap &>/dev/null; then
-        print_warn "nmap not available — skipping port scan"
-        report_append "$report" "nmap not available"
+        print_warn "nmap not found — skipping port scan"
         return
     fi
 
-    print_info "Scanning top 1000 ports with version & script detection..."
+    print_info "Running nmap scan (may take 30-60 seconds)..."
     echo ""
 
-    local nmap_xml
-    nmap_xml=$(mktemp /tmp/sentrycli_nmap_XXXX.xml)
+    local nmap_out xml_file="/tmp/sentry_nmap_$$.xml"
 
-    # Run nmap and capture both normal and XML output
-    local nmap_out
-    nmap_out=$(nmap -sV -sC --open -T4 \
-        --script=banner,http-title,ssh-hostkey \
-        -oX "$nmap_xml" \
-        "$target" 2>/dev/null)
+    nmap_out=$(nmap -sV -sC -O -T4 --open --script=banner,http-title \
+                -oX "$xml_file" "$target" 2>&1)
 
-    # ── Parse & display open ports in a clean table ───────────────────────────
-    # Extract port lines from nmap normal output:
-    # Format: 22/tcp   open  ssh     OpenSSH 8.9p1 Ubuntu ...
-    local found_ports=0
     local port_lines
-    port_lines=$(echo "$nmap_out" | grep -E "^[0-9]+/(tcp|udp)[[:space:]]+open")
+    port_lines=$(echo "$nmap_out" | grep -E "^[0-9]+/(tcp|udp)[[:space:]]+open" | sort -V)
 
     if [[ -n "$port_lines" ]]; then
-        print_port_header
+        printf "${BOLD}%-12s %-8s %-20s %-35s${RESET}\n" "PORT" "STATE" "SERVICE" "VERSION"
+        echo "──────────────────────────────────────────────────────────────────────────────"
 
         while IFS= read -r line; do
-            local port proto state service version risk_color
-            port=$(echo "$line"    | awk '{print $1}' | cut -d'/' -f1)
-            proto=$(echo "$line"   | awk '{print $1}' | cut -d'/' -f2)
-            state=$(echo "$line"   | awk '{print $2}')
+            local port proto service version
+            port=$(echo "$line" | awk '{print $1}' | cut -d'/' -f1)
+            proto=$(echo "$line" | awk '{print $1}' | cut -d'/' -f2)
             service=$(echo "$line" | awk '{print $3}')
             version=$(echo "$line" | awk '{for(i=4;i<=NF;i++) printf $i" "; print ""}' | sed 's/[[:space:]]*$//')
 
-            # Truncate long version strings
-            if [[ ${#version} -gt 42 ]]; then
-                version="${version:0:42}…"
-            fi
+            [[ ${#version} -gt 32 ]] && version="${version:0:29}..."
 
-            # Color by risk
-            risk_color="$WHITE"
+            local color="$WHITE"
             case "$port" in
-                21|23)   risk_color="$RED" ;;
-                22|3389) risk_color="$YELLOW" ;;
-                80|443)  risk_color="$GREEN" ;;
-                445|3306|1433|5432|6379|27017) risk_color="$RED" ;;
+                21|23|445|1433|3306|5432|3389|5900|6379|27017|9200) color="$RED" ;;
+                22|80|443|8080|8443) color="$GREEN" ;;
+                *) color="$YELLOW" ;;
             esac
 
-            print_port_row "${port}/${proto}" "$state" "$service" "$version" "$risk_color"
-            report_append "$report" "$(printf '%-18s  %-8s  %-14s  %s' "${port}/${proto}" "$state" "$service" "$version")"
-            log_info "RECON" "Open port: ${port}/${proto} $service $version"
-            (( found_ports++ ))
+            printf "${color}%-12s${RESET} open     %-20s %-35s\n" "${port}/${proto}" "$service" "${version:-N/A}"
+            report_append "$report" "${port}/${proto} open ${service} ${version}"
         done <<< "$port_lines"
-
         echo ""
-    fi
-
-    # ── Summary ───────────────────────────────────────────────────────────────
-    if [[ $found_ports -eq 0 ]]; then
-        print_warn "No open ports detected — target may be filtered or down"
-        report_append "$report" "No open ports found"
     else
-        print_kv "  Open ports found" "$found_ports"
-        report_append "$report" "TOTAL OPEN PORTS: $found_ports"
+        print_warn "No open ports detected (firewall may be active or host is down)"
+        report_append "$report" "No open ports found"
     fi
 
-    # ── HTTP titles from nmap scripts ─────────────────────────────────────────
-    local http_titles
-    http_titles=$(echo "$nmap_out" | grep -i "http-title" | sed 's/.*http-title: //')
-    if [[ -n "$http_titles" ]]; then
-        echo ""
-        print_kv "  HTTP Title(s)" "$http_titles"
-        report_append "$report" "HTTP Title: $http_titles"
+    # OS Fingerprint
+    local os_info=$(echo "$nmap_out" | grep -oE 'OS details: .*' | sed 's/OS details: //' | head -1)
+    if [[ -n "$os_info" ]]; then
+        print_kv "OS Fingerprint" "$os_info"
+        report_append "$report" "OS Fingerprint: $os_info"
     fi
 
-    # ── SSH host key fingerprints ─────────────────────────────────────────────
-    local ssh_keys
-    ssh_keys=$(echo "$nmap_out" | grep -A2 "ssh-hostkey" | grep -E "[0-9a-f]{2}:" | head -2 | sed 's/^[[:space:]]*//')
-    if [[ -n "$ssh_keys" ]]; then
-        echo ""
-        print_info "SSH Host Key Fingerprints:"
-        while IFS= read -r key; do
-            print_kv "  " "$key"
-        done <<< "$ssh_keys"
-    fi
-
-    # ── Banner grabs ──────────────────────────────────────────────────────────
-    local banners
-    banners=$(echo "$nmap_out" | grep -E "^\|.*banner" | head -5 | sed 's/^|[[:space:]]*//')
-    if [[ -n "$banners" ]]; then
-        echo ""
-        print_info "Service Banners:"
-        while IFS= read -r banner; do
-            print_kv "  " "$banner"
-        done <<< "$banners"
-    fi
-
-    # ── Flag risky ports ──────────────────────────────────────────────────────
-    _recon_flag_risky_ports "$nmap_out" "$report"
-
-    # Save nmap XML
-    if [[ -f "$nmap_xml" ]]; then
+    # Save XML report
+    if [[ -f "$xml_file" ]]; then
         local xml_dest="${SENTRYCLI_ROOT}/reports/nmap_${target//[^a-zA-Z0-9._-]/_}_$(date +%Y%m%d_%H%M%S).xml"
-        cp "$nmap_xml" "$xml_dest"
-        rm -f "$nmap_xml"
-        print_kv "  Raw XML saved" "$xml_dest"
+        mv "$xml_file" "$xml_dest" 2>/dev/null
+        print_kv "nmap XML Saved" "$xml_dest"
         report_append "$report" "nmap XML: $xml_dest"
     fi
+
+    _recon_flag_risky_ports "$nmap_out" "$report"
+    echo ""
 }
 
-# ── Flag Risky Ports ──────────────────────────────────────────────────────────
+# ── High Risk Ports Alert ───────────────────────────────────────────────────
 _recon_flag_risky_ports() {
     local nmap_out="$1"
     local report="$2"
 
-    local risky_ports=(
-        "21:FTP — cleartext credentials, anon login risk"
-        "23:Telnet — cleartext session, CRITICAL"
-        "445:SMB — EternalBlue / ransomware vector"
-        "1433:MSSQL — database exposed to network"
-        "3306:MySQL — database exposed to network"
-        "5432:PostgreSQL — database exposed to network"
-        "3389:RDP — brute-force / BlueKeep risk"
-        "5900:VNC — remote access, often unencrypted"
-        "6379:Redis — frequently unauthenticated"
-        "27017:MongoDB — frequently unauthenticated"
-        "9200:Elasticsearch — data exposure risk"
+    local risky=(
+        "21:FTP — cleartext risk"
+        "23:Telnet — cleartext, CRITICAL"
+        "445:SMB — ransomware vector"
+        "1433:MSSQL exposed"
+        "3306:MySQL exposed"
+        "5432:PostgreSQL exposed"
+        "3389:RDP — brute force risk"
+        "6379:Redis often unauthenticated"
+        "27017:MongoDB often unauthenticated"
     )
 
-    local found_risky=0
-    for entry in "${risky_ports[@]}"; do
+    local found=0
+    for entry in "${risky[@]}"; do
         local port="${entry%%:*}"
         local note="${entry#*:}"
         if echo "$nmap_out" | grep -qE "^${port}/(tcp|udp)[[:space:]]+open"; then
-            if [[ $found_risky -eq 0 ]]; then
-                echo ""
-                echo -e "  ${RED}${BOLD}⚠  HIGH-RISK PORTS DETECTED${RESET}"
-                echo -e "  ${DIM}$(printf '%.0s─' {1..50})${RESET}"
-                report_section "$report" "Risky Ports Flagged"
-            fi
-            print_critical "Port ${port} — ${note}"
+            [[ $found -eq 0 ]] && { echo ""; print_critical "HIGH-RISK PORTS DETECTED:"; }
+            print_critical "   • Port ${port} — ${note}"
             report_append "$report" "RISK: Port $port - $note"
-            log_alert "RECON" "Risky port open: $port - $note"
-            (( found_risky++ ))
+            (( found++ ))
         fi
     done
 }
 
-# ── HTTP/HTTPS Probe ──────────────────────────────────────────────────────────
+# ── HTTP/HTTPS Probe ────────────────────────────────────────────────────────
 _recon_http_probe() {
     local target="$1"
     local report="$2"
 
-    print_subsection "HTTP/HTTPS Probe"
+    print_subsection "HTTP/HTTPS Security Headers"
     report_section "$report" "HTTP Probe"
-    log_info "RECON" "HTTP probing: $target"
 
     if ! command -v curl &>/dev/null; then
-        print_warn "curl not available — skipping"
+        print_warn "curl not available"
         return
     fi
 
-    for scheme in "https" "http"; do
+    for scheme in https http; do
         local url="${scheme}://${target}"
         print_info "Probing ${url}..."
 
         local headers
-        headers=$(curl -s -I -L --max-time 10 --connect-timeout 5 \
-            -A "Mozilla/5.0 (compatible; SentryCLI/1.0)" \
-            "$url" 2>/dev/null)
+        headers=$(curl -s -I -L --max-time 10 --connect-timeout 6 \
+            -A "Mozilla/5.0 (compatible; SentryCLI/1.0)" "$url" 2>/dev/null)
 
         if [[ -z "$headers" ]]; then
-            print_warn "  No response from ${url}"
+            print_warn " No response from ${url}"
             continue
         fi
 
-        local status server powered_by x_frame hsts csp
-        status=$(echo "$headers"     | grep -i "^HTTP/"              | tail -1 | tr -d '\r')
-        server=$(echo "$headers"     | grep -i "^Server:"            | head -1 | cut -d':' -f2- | tr -d '\r ')
-        powered_by=$(echo "$headers" | grep -i "^X-Powered-By:"      | head -1 | cut -d':' -f2- | tr -d '\r ')
-        x_frame=$(echo "$headers"    | grep -i "^X-Frame-Options:"   | head -1 | cut -d':' -f2- | tr -d '\r ')
-        hsts=$(echo "$headers"       | grep -i "^Strict-Transport-Security:" | head -1 | cut -d':' -f2- | tr -d '\r ')
-        csp=$(echo "$headers"        | grep -i "^Content-Security-Policy:"   | head -1 | cut -d':' -f2- | tr -d '\r ')
+        local status server xframe hsts csp
+        status=$(echo "$headers" | grep -i "^HTTP/" | tail -1 | tr -d '\r')
+        server=$(echo "$headers" | grep -i "^Server:" | head -1 | cut -d':' -f2- | tr -d '\r ')
+        xframe=$(echo "$headers" | grep -i "^X-Frame-Options:" | head -1 | cut -d':' -f2- | tr -d '\r ')
+        hsts=$(echo "$headers" | grep -i "^Strict-Transport-Security:" | head -1 | cut -d':' -f2- | tr -d '\r ')
+        csp=$(echo "$headers" | grep -i "^Content-Security-Policy:" | head -1 | cut -d':' -f2- | tr -d '\r ')
 
-        echo ""
-        print_kv "  Status"          "$status"
-        print_kv "  Server"          "${server:-unknown}"
-        [[ -n "$powered_by" ]] && print_kv "  X-Powered-By"  "$powered_by"
-        print_kv "  X-Frame-Options" "${x_frame:-${YELLOW}MISSING ⚠${RESET}}"
-        print_kv "  HSTS"            "${hsts:-${YELLOW}NOT SET ⚠${RESET}}"
-        [[ -n "$csp" ]] && print_kv "  CSP" "${csp:0:60}"
+        print_kv " Status" "$status"
+        print_kv " Server" "${server:-unknown}"
+        print_kv " X-Frame-Options" "${xframe:-${YELLOW}MISSING${RESET}}"
+        print_kv " HSTS" "${hsts:-${YELLOW}NOT SET${RESET}}"
+        [[ -n "$csp" ]] && print_kv " CSP" "${csp:0:65}..."
 
-        echo ""
-        # Security header warnings — consolidated, not repeated
-        local issues=()
-        [[ -z "$x_frame" ]] && issues+=("Missing X-Frame-Options (clickjacking risk)")
-        [[ -z "$hsts" ]]    && issues+=("Missing HSTS (SSL downgrade risk)")
-        [[ -z "$csp" ]]     && issues+=("Missing Content-Security-Policy (XSS risk)")
-
-        for issue in "${issues[@]}"; do
-            print_warn "  $issue"
-        done
-
-        report_append "$report" "$scheme Status     : $status"
-        report_append "$report" "$scheme Server     : ${server:-unknown}"
-        report_append "$report" "$scheme Powered-By : ${powered_by:-N/A}"
-        report_append "$report" "$scheme HSTS       : ${hsts:-NOT SET}"
-        report_append "$report" "$scheme X-Frame    : ${x_frame:-MISSING}"
-        break   # probe the first responsive scheme only
+        report_append "$report" "$scheme: $status | Server: ${server:-unknown} | HSTS: ${hsts:-MISSING}"
+        break
     done
+    echo ""
 }
 
-# ── Subdomain Discovery ───────────────────────────────────────────────────────
+# ── Subdomain Hints ─────────────────────────────────────────────────────────
 _recon_subdomain_hints() {
     local target="$1"
     local report="$2"
 
-    # Skip for IPs
     if echo "$target" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
         return
     fi
 
-    print_subsection "Subdomain Discovery"
+    print_subsection "Common Subdomain Check"
     report_section "$report" "Subdomain Discovery"
-    log_info "RECON" "Subdomain probing: $target"
 
-    local common_subs=(
-        "www" "mail" "remote" "blog" "webmail" "server"
-        "ns1" "ns2" "smtp" "secure" "vpn" "m" "shop"
-        "ftp" "admin" "api" "dev" "staging" "test"
-        "portal" "cloud" "cdn" "app" "auth" "git"
-    )
+    local common_subs=("www" "mail" "remote" "admin" "api" "dev" "test" "staging" "portal" "vpn" "ftp" "login")
+    print_info "Checking ${#common_subs[@]} common subdomains..."
 
     local found=0
-    print_info "Probing ${#common_subs[@]} common subdomains..."
-    echo ""
-
     for sub in "${common_subs[@]}"; do
         local fqdn="${sub}.${target}"
-        local ip
-        ip=$(dig +short A "$fqdn" 2>/dev/null | head -1)
+        local ip=$(dig +short A "$fqdn" 2>/dev/null | head -1)
         if [[ -n "$ip" ]]; then
-            printf "    ${GREEN}✔${RESET}  ${WHITE}%-32s${RESET}  ${CYAN}%s${RESET}\n" "$fqdn" "$ip"
-            report_append "$report" "  $fqdn -> $ip"
-            log_info "RECON" "Subdomain: $fqdn -> $ip"
+            printf " ${GREEN}✔${RESET} %-35s → %s\n" "$fqdn" "$ip"
+            report_append "$report" "Subdomain: $fqdn → $ip"
             (( found++ ))
         fi
     done
 
+    [[ $found -eq 0 ]] && print_info "No common subdomains resolved"
     echo ""
-    if [[ $found -eq 0 ]]; then
-        print_info "No common subdomains resolved"
-    else
-        print_kv "  Subdomains found" "$found"
-    fi
 }
