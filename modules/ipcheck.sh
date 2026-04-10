@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 
 # =============================================================================
-# SentryCLI - IP Threat Intelligence Module
+# SentryCLI - IP / Hash Threat Intelligence Module
 # modules/ipcheck.sh
+#
+# Usage:
+#   --ip   <IP_ADDRESS>     → Analyze IPv4 address (AbuseIPDB + VirusTotal)
+#   --hash <HASH>           → Analyze file hash (MD5/SHA1/SHA256) using VirusTotal only
 # =============================================================================
 
 # ── JSON extractor ───────────────────────────────────────────────────────────
@@ -26,7 +30,7 @@ except:
     echo "$json" | grep -o "\"${key}\":[^,}]*" | head -1 | sed 's/^"[^"]*":[[:space:]]*//' | tr -d '"'
 }
 
-# ── FIXED & ROBUST CURL FUNCTION ─────────────────────────────────────────────
+# ── Robust CURL Function ─────────────────────────────────────────────────────
 _ipcheck_curl_request() {
     local label="$1"
     local url="$2"
@@ -35,14 +39,13 @@ _ipcheck_curl_request() {
 
     local tmp_body=$(mktemp /tmp/sentry_body_XXXX.json 2>/dev/null)
     local tmp_err=$(mktemp /tmp/sentry_err_XXXX.txt 2>/dev/null)
-    local tmp_headers=$(mktemp /tmp/sentry_hdrs_XXXX.txt 2>/dev/null)
 
     local http_code exit_code
 
     http_code=$(curl -4 -s \
         --retry 3 --retry-delay 2 --retry-connrefused \
         --max-time "${API_TIMEOUT:-30}" --connect-timeout 12 \
-        -D "$tmp_headers" -w "%{http_code}" -o "$tmp_body" \
+        -w "%{http_code}" -o "$tmp_body" \
         "${curl_args[@]}" "$url" 2>"$tmp_err")
 
     exit_code=$?
@@ -52,41 +55,29 @@ _ipcheck_curl_request() {
 
     rm -f "$tmp_err"
 
-    # DNS fallback
-    if [[ $exit_code -eq 6 ]]; then
-        print_warn "  [${label}] DNS failed — retrying with Google DNS..."
-        http_code=$(curl -4 -s --dns-servers 8.8.8.8 \
-            --retry 2 --max-time 20 -w "%{http_code}" -o "$tmp_body" \
-            "${curl_args[@]}" "$url" 2>"$tmp_err")
-        exit_code=$?
-        body=$(cat "$tmp_body" 2>/dev/null || echo "")
-    fi
-
     if [[ $exit_code -ne 0 ]]; then
         print_alert "  [${label}] Network error (curl ${exit_code})"
         [[ -n "$stderr" ]] && echo "    ${stderr}"
-        rm -f "$tmp_body" "$tmp_headers"
+        rm -f "$tmp_body"
         return 1
     fi
 
     if [[ "$http_code" != "200" ]]; then
         print_alert "  [${label}] HTTP ${http_code} Error"
         if [[ -n "$body" ]]; then
-            echo -e "    API Response:\n${body:0:900}"
+            echo -e "    Response:\n${body:0:900}"
             echo "$body" > "/tmp/${label}_error_$(date +%s).json" 2>/dev/null
-            print_info "    Full response saved to /tmp/${label}_error_*.json"
         fi
-        rm -f "$tmp_body" "$tmp_headers"
+        rm -f "$tmp_body"
         return 1
     fi
 
     if [[ -z "$body" ]]; then
         print_alert "  [${label}] Empty response"
-        rm -f "$tmp_body" "$tmp_headers"
+        rm -f "$tmp_body"
         return 1
     fi
 
-    rm -f "$tmp_headers"
     echo "$body"
     rm -f "$tmp_body"
     return 0
@@ -104,7 +95,7 @@ _ipcheck_verify_api_key() {
     return 0
 }
 
-# ── IP checks ────────────────────────────────────────────────────────────────
+# ── IP Validation ────────────────────────────────────────────────────────────
 _ipcheck_is_valid_ip() {
     local ip="$1"
     [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
@@ -121,10 +112,50 @@ _ipcheck_is_private() {
 
 # ── Module Entry Point ───────────────────────────────────────────────────────
 run_ipcheck() {
-    local ips_input=("$@")
+    local mode=""
+    local input=""
 
-    print_section "IP THREAT INTELLIGENCE MODULE"
+    # Parse command line arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --ip)
+                mode="ip"
+                input="$2"
+                shift 2
+                ;;
+            --hash)
+                mode="hash"
+                input="$2"
+                shift 2
+                ;;
+            *)
+                print_alert "Unknown option: $1"
+                echo "Usage:"
+                echo "  --ip   <IP_ADDRESS>     → Analyze IPv4 address"
+                echo "  --hash <HASH>           → Analyze file hash (MD5/SHA1/SHA256)"
+                return 1
+                ;;
+        esac
+    done
 
+    # Interactive mode if no arguments provided
+    if [[ -z "$mode" ]]; then
+        print_section "IP / HASH THREAT INTELLIGENCE MODULE"
+        echo -ne "  Choose mode (ip/hash): "
+        read -r mode_choice
+        if [[ "$mode_choice" =~ ^(hash|h)$ ]]; then
+            mode="hash"
+        else
+            mode="ip"
+        fi
+
+        echo -ne "  Enter ${mode^^}: "
+        read -r input
+    fi
+
+    [[ -z "$input" ]] && { print_alert "No input provided"; return 1; }
+
+    # Load API keys
     local conf_file="${SENTRYCLI_ROOT}/config/api_keys.conf"
     if [[ -f "$conf_file" ]]; then
         source "$conf_file"
@@ -135,67 +166,55 @@ run_ipcheck() {
 
     echo ""
     print_subsection "API Key Status"
-
     local abuseipdb_ok=0 virustotal_ok=0
     if _ipcheck_verify_api_key "AbuseIPDB" "${ABUSEIPDB_API_KEY:-}"; then abuseipdb_ok=1; fi
     if _ipcheck_verify_api_key "VirusTotal" "${VIRUSTOTAL_API_KEY:-}"; then virustotal_ok=1; fi
 
-    if [[ $abuseipdb_ok -eq 0 && $virustotal_ok -eq 0 ]]; then
-        print_warn "No API keys active — limited to offline checks"
-    fi
+    local report
+    report=$(report_init "ipcheck")
+    report_section "$report" "Threat Intelligence Results"
 
-    if ! command -v curl &>/dev/null; then
-        print_alert "curl is not installed"
-        return 1
-    fi
+    input=$(echo "$input" | tr -d '[:space:]')
 
-    if [[ ${#ips_input[@]} -eq 0 ]]; then
-        echo -ne "  Enter IP address(es): "
-        read -r raw
-        IFS=', ' read -ra ips_input <<< "$raw"
-    fi
-
-    [[ ${#ips_input[@]} -eq 0 ]] && { print_alert "No IPs provided"; return 1; }
-
-    local report=$(report_init "ipcheck")
-    report_section "$report" "Results"
-
-    for ip in "${ips_input[@]}"; do
-        ip=$(echo "$ip" | tr -d '[:space:]')
-        [[ -z "$ip" ]] && continue
-
-        if ! _ipcheck_is_valid_ip "$ip"; then
-            print_warn "Invalid IPv4: ${ip}"
-            continue
+    if [[ "$mode" == "hash" ]]; then
+        print_subsection "Analyzing HASH → ${input}"
+        _ipcheck_analyze_hash "$input" "$report" "$virustotal_ok"
+    else
+        # IP Mode
+        if ! _ipcheck_is_valid_ip "$input"; then
+            print_warn "Invalid IPv4 address: ${input}"
+            return 1
         fi
-        if _ipcheck_is_private "$ip"; then
-            print_info "Private IP skipped: ${ip}"
-            continue
+        if _ipcheck_is_private "$input"; then
+            print_info "Private IP skipped: ${input}"
+            return 0
         fi
-
-        _ipcheck_analyze_ip "$ip" "$report" "$abuseipdb_ok" "$virustotal_ok"
-    done
+        print_subsection "Analyzing IP → ${input}"
+        _ipcheck_analyze_ip "$input" "$report" "$abuseipdb_ok" "$virustotal_ok"
+    fi
 
     report_finalize "$report"
+    log_success "IPCHECK" "Analysis completed successfully"
 }
 
-# ── Analyze Single IP ────────────────────────────────────────────────────────
+# ── Analyze IP (AbuseIPDB + VirusTotal) ─────────────────────────────────────
 _ipcheck_analyze_ip() {
-    local ip="$1" report="$2" abuse_ok="$3" vt_ok="$4"
-    local threat_score=0
-    local -a details=()
+    local ip="$1"
+    local report="$2"
+    local abuse_ok="$3"
+    local vt_ok="$4"
 
-    print_subsection "Analyzing → ${ip}"
-    report_section "$report" "IP: ${ip}"
+    local threat_score=0
 
     # GeoIP
-    print_info "  GeoIP lookup..."
+    print_info "  Fetching GeoIP data..."
     local geo_body=$(_ipcheck_curl_request "GeoIP" "http://ip-api.com/json/${ip}?fields=status,country,city,isp,org,proxy,hosting")
+
     if [[ $? -eq 0 && -n "$geo_body" ]]; then
-        local country=$(_json_get "$geo_body" "country")
-        local city=$(_json_get "$geo_body" "city")
-        local isp=$(_json_get "$geo_body" "isp")
-        local proxy=$(_json_get "$geo_body" "proxy")
+        local country=$( _json_get "$geo_body" "country")
+        local city=$(   _json_get "$geo_body" "city")
+        local isp=$(    _json_get "$geo_body" "isp")
+        local proxy=$(  _json_get "$geo_body" "proxy")
         local hosting=$(_json_get "$geo_body" "hosting")
 
         print_kv "  Country" "${country:-N/A}"
@@ -204,17 +223,15 @@ _ipcheck_analyze_ip() {
         print_kv "  Proxy"   "${proxy:-false}"
         print_kv "  Hosting" "${hosting:-false}"
 
-        [[ "$proxy" == "true" ]] && ((threat_score += 20)) && details+=("Proxy/VPN detected")
-        [[ "$hosting" == "true" ]] && ((threat_score += 10)) && details+=("Hosting / Datacenter")
+        [[ "$proxy" == "true" ]] && ((threat_score += 20))
+        [[ "$hosting" == "true" ]] && ((threat_score += 10))
     fi
 
     # AbuseIPDB
     if [[ $abuse_ok -eq 1 ]]; then
         echo ""
         print_info "  Querying AbuseIPDB..."
-
-        local abuse_body
-        abuse_body=$(_ipcheck_curl_request "AbuseIPDB" \
+        local abuse_body=$(_ipcheck_curl_request "AbuseIPDB" \
             "https://api.abuseipdb.com/api/v2/check" \
             -G \
             --data-urlencode "ipAddress=${ip}" \
@@ -223,79 +240,96 @@ _ipcheck_analyze_ip() {
             -H "Key: ${ABUSEIPDB_API_KEY}" \
             -H "Accept: application/json")
 
-        # Debug file (very useful)
-        echo "$abuse_body" > "/tmp/abuseipdb_debug.log" 2>/dev/null
-        print_info "  Raw AbuseIPDB response saved → /tmp/abuseipdb_debug.log"
-
         if [[ $? -eq 0 && -n "$abuse_body" ]]; then
-            local score=0 tor="false" whitelisted="false"
-
-            if command -v python3 &>/dev/null; then
-                score=$(echo "$abuse_body" | python3 -c '
+            local score=$(echo "$abuse_body" | python3 -c '
 import sys,json
-try:
-    d=json.load(sys.stdin)
-    print(d.get("data",{}).get("abuseConfidenceScore",0))
-except: print(0)' 2>/dev/null)
+d=json.load(sys.stdin)
+print(d.get("data",{}).get("abuseConfidenceScore",0))' 2>/dev/null)
 
-                tor=$(echo "$abuse_body" | python3 -c '
+            local tor=$(echo "$abuse_body" | python3 -c '
 import sys,json
-try:
-    d=json.load(sys.stdin)
-    print("true" if d.get("data",{}).get("isTor") else "false")
-except: print("false")' 2>/dev/null)
-
-                whitelisted=$(echo "$abuse_body" | python3 -c '
-import sys,json
-try:
-    d=json.load(sys.stdin)
-    print("true" if d.get("data",{}).get("isWhitelisted") else "false")
-except: print("false")' 2>/dev/null)
-            fi
+d=json.load(sys.stdin)
+print("true" if d.get("data",{}).get("isTor") else "false")' 2>/dev/null)
 
             print_kv "  [AbuseIPDB] Score" "${score}/100"
             print_kv "  [AbuseIPDB] Tor" "$tor"
-            print_kv "  [AbuseIPDB] Whitelisted" "$whitelisted"
 
             (( threat_score += score ))
-            [[ "$whitelisted" == "true" ]] && (( threat_score -= 25 ))
-            [[ "$tor" == "true" ]] && (( threat_score += 40 )) && details+=("Tor Exit Node")
+            [[ "$tor" == "true" ]] && (( threat_score += 40 ))
         fi
     fi
 
-    # Offline checks
-    _ipcheck_offline_heuristic "$ip" threat_score details
-
-    # Verdict
+    # Final Verdict for IP
     local final_score=$(( threat_score > 100 ? 100 : threat_score < 0 ? 0 : threat_score ))
-
     print_kv "  Final Threat Score" "${final_score}/100"
 
     if [[ $final_score -ge 70 ]]; then
-        print_critical "  VERDICT: ★ MALICIOUS"
+        print_critical "  VERDICT: ★ MALICIOUS IP"
     elif [[ $final_score -ge 40 ]]; then
         print_alert "  VERDICT: ⚠ LIKELY MALICIOUS"
-    elif [[ $final_score -ge 15 ]]; then
-        print_warn "  VERDICT: ? SUSPICIOUS"
     else
-        print_success "  VERDICT: ✔ CLEAN"
+        print_success "  VERDICT: CLEAN"
     fi
 
-    report_append "$report" "Score: ${final_score} | Verdict: ${verdict:-UNKNOWN}"
+    echo "VERDICT:IP_${final_score}"
 }
 
-# ── Offline Heuristics ───────────────────────────────────────────────────────
-_ipcheck_offline_heuristic() {
-    local ip="$1"
-    local -n score=$2
-    local -n det=$3
+# ── Analyze Hash (VirusTotal Only) ──────────────────────────────────────────
+_ipcheck_analyze_hash() {
+    local hash="$1"
+    local report="$2"
+    local vt_ok="$3"
 
-    local rev_ip=$(echo "$ip" | awk -F. '{print $4"."$3"."$2"."$1}')
-
-    local spamhaus=$(dig +short "${rev_ip}.zen.spamhaus.org" 2>/dev/null | head -1)
-    if [[ -n "$spamhaus" && "$spamhaus" =~ ^127\. ]]; then
-        (( score += 35 ))
-        det+=("Spamhaus ZEN")
-        print_alert "  → Listed on Spamhaus ZEN"
+    if [[ $vt_ok -ne 1 ]]; then
+        print_alert "VirusTotal API key is required for hash analysis"
+        echo "VERDICT:HASH_ERROR"
+        return
     fi
+
+    print_info "  Querying VirusTotal for file hash..."
+
+    local vt_body
+    vt_body=$(_ipcheck_curl_request "VirusTotal" \
+        "https://www.virustotal.com/api/v3/files/${hash}" \
+        -H "x-apikey: ${VIRUSTOTAL_API_KEY}")
+
+    if [[ $? -ne 0 || -z "$vt_body" ]]; then
+        print_alert "Failed to retrieve VirusTotal report for the hash"
+        echo "VERDICT:HASH_ERROR"
+        return
+    fi
+
+    local malicious suspicious
+    malicious=$(echo "$vt_body" | python3 -c '
+import sys,json
+try:
+    d=json.load(sys.stdin)
+    print(d.get("data",{}).get("attributes",{}).get("last_analysis_stats",{}).get("malicious",0))
+except: print(0)' 2>/dev/null)
+
+    suspicious=$(echo "$vt_body" | python3 -c '
+import sys,json
+try:
+    d=json.load(sys.stdin)
+    print(d.get("data",{}).get("attributes",{}).get("last_analysis_stats",{}).get("suspicious",0))
+except: print(0)' 2>/dev/null)
+
+    print_kv "  [VirusTotal] Malicious engines"   "${malicious}"
+    print_kv "  [VirusTotal] Suspicious engines" "${suspicious}"
+
+    local score=0
+    if [[ "${malicious}" -ge 5 ]]; then
+        print_critical "  VERDICT: ★ MALICIOUS FILE"
+        score=90
+    elif [[ "${malicious}" -gt 0 || "${suspicious}" -gt 0 ]]; then
+        print_alert "  VERDICT: ⚠ SUSPICIOUS FILE"
+        score=55
+    else
+        print_success "  VERDICT: CLEAN FILE"
+        score=10
+    fi
+
+    print_kv "  Threat Score" "${score}/100"
+    echo "VERDICT:HASH_${score}"
 }
+                         
