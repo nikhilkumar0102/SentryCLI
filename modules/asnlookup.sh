@@ -1,188 +1,214 @@
 #!/usr/bin/env bash
 # =============================================================================
-# SentryCLI - ASN Lookup Module
-# modules/asnlookup.sh
-# Professional ASN Intelligence with clean SOC-style report
+# SentryCLI - Professional ASN / IP Intelligence Module
+# Clean SOC-Style Output + Human Readable Report
 # =============================================================================
 
-# ── Module Entry Point ────────────────────────────────────────────────────────
+# Load API configuration
+if [[ -f "${SENTRYCLI_ROOT:-.}/config/api_keys.conf" ]]; then
+    source "${SENTRYCLI_ROOT:-.}/config/api_keys.conf" 2>/dev/null || true
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 run_asnlookup() {
-    print_section "6. ASN LOOKUP [ASN-6]"
+
+    print_section "6. ASN / IP INTELLIGENCE [ASN-6]"
 
     local input=""
 
-    # Parse arguments / REPL support
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --asn|--as|--input)
-                input="$2"
-                shift 2
-                ;;
-            --clear-asn|--clear)
-                unset ASN 2>/dev/null || true
-                print_success "ASN/IP cleared from REPL session"
-                return 0
-                ;;
-            *)
-                print_alert "Unknown option: $1"
-                echo "Usage: --asn <ASN or IP>"
-                return 1
-                ;;
-        esac
-    done
-
-    # REPL set support
-    if [[ -z "$input" && -n "${ASN:-}" ]]; then
-        input="${ASN}"
-        print_info "Using REPL-set ASN/IP → ${input}"
+    # Input from REPL set command
+    if [[ -n "${MODULE_OPTS[asn]:-}" ]]; then
+        input="${MODULE_OPTS[asn]}"
+        print_info "Using configured ASN/IP: ${input}"
+    elif [[ -n "${MODULE_OPTS[target]:-}" ]]; then
+        input="${MODULE_OPTS[target]}"
+    elif [[ -n "$1" ]]; then
+        input="$1"
     fi
 
-    # Interactive input
+    # Interactive prompt
     if [[ -z "$input" ]]; then
-        echo -ne "${CYAN}Enter ASN (e.g. AS15169) or IP: ${RESET}"
+        echo -ne "${CYAN}Enter ASN (e.g. 15169) or IP Address: ${RESET}"
         read -r input
     fi
 
-    [[ -z "$input" ]] && { print_alert "No ASN or IP provided."; return 1; }
-    input=$(echo "$input" | tr -d '[:space:]')
+    [[ -z "$input" ]] && { print_alert "No input provided."; return 1; }
 
-    local report
-    report=$(report_init "asnlookup")
+    # Normalize input
+    input=$(echo "$input" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')
+    if [[ "$input" =~ ^[0-9]+$ ]]; then
+        input="AS${input}"
+        print_info "Auto-converted to ASN format → ${input}"
+    fi
 
-    print_subsection "Querying ASN Intelligence → ${input}"
+    # Prepare clean report file
+    local report_dir="${SENTRYCLI_ROOT:-.}/reports"
+    mkdir -p "$report_dir"
+    local report="${report_dir}/ASN_Intelligence_$(date '+%Y%m%d_%H%M%S').txt"
+
+    print_subsection "Querying ipapi.is → ${input}"
+
     _asn_analyze "$input" "$report"
 
-    report_finalize "$report"
-    log_success "ASNLOOKUP" "Analysis completed successfully"
-
     echo ""
-    echo -ne "${CYAN}Press ENTER to return to SentryCLI REPL...${RESET}"
+    print_success "Analysis completed successfully"
+    print_success "Report saved → ${report}"
+
+    echo -ne "${CYAN}Press ENTER to return to main menu...${RESET}"
     read -r
+
+    CURRENT_MODULE=""
+    MODULE_OPTS=()
 }
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-_report_add() {
-    local report="$1"
-    local line="$2"
-    [[ -n "$report" && -f "$report" ]] || return
-    echo -e "$line" >> "$report"
-}
-
-_report_add_kv() {
-    local report="$1"
-    local key="$2"
-    local value="$3"
-    _report_add "$report" "**${key}**: ${value}"
-}
-
-_report_add_raw() {
-    local report="$1"
-    local title="$2"
-    local json="$3"
-    [[ -n "$report" && -f "$report" ]] || return
-    _report_add "$report" ""
-    _report_add "$report" "### ${title}"
-    _report_add "$report" '```json'
-    echo "${json:0:2000}" >> "$report"
-    _report_add "$report" '```'
-}
-
-# ── Main ASN Analysis Engine ─────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 _asn_analyze() {
     local query="$1"
     local report="$2"
 
-    # Clean ASN format (add AS prefix if missing and it's numeric)
-    if [[ "$query" =~ ^[0-9]+$ ]]; then
-        query="AS${query}"
-    fi
+    local api_url="https://api.ipapi.is/?q=${query}"
 
-    print_info " Querying BGPView & IPInfo..."
-
-    # 1. BGPView API (Best free ASN source)
-    local bgp_body
-    bgp_body=$(curl -s --max-time 15 "https://api.bgpview.io/asn/${query#AS}")
-
-    if [[ -n "$bgp_body" && "$bgp_body" != *"error"* ]]; then
-        print_success " BGPView data retrieved"
-
-        local asn_name=$(echo "$bgp_body" | python3 -c '
-import sys,json
-try:
-    d=json.load(sys.stdin)
-    print(d.get("data",{}).get("name","N/A"))
-except: print("N/A")
-' 2>/dev/null)
-
-        local asn_description=$(echo "$bgp_body" | python3 -c '
-import sys,json
-try:
-    d=json.load(sys.stdin)
-    print(d.get("data",{}).get("description","N/A"))
-except: print("N/A")
-' 2>/dev/null)
-
-        local asn_country=$(echo "$bgp_body" | python3 -c '
-import sys,json
-try:
-    d=json.load(sys.stdin)
-    print(d.get("data",{}).get("country_code","N/A"))
-except: print("N/A")
-' 2>/dev/null)
-
-        local asn_type=$(echo "$bgp_body" | python3 -c '
-import sys,json
-try:
-    d=json.load(sys.stdin)
-    print(d.get("data",{}).get("type","N/A"))
-except: print("N/A")
-' 2>/dev/null)
-
-        local prefixes=$(echo "$bgp_body" | python3 -c '
-import sys,json
-try:
-    d=json.load(sys.stdin)
-    print(len(d.get("data",{}).get("prefixes",[])))
-except: print("0")
-' 2>/dev/null)
-
-        _report_add_kv "$report" "ASN" "$query"
-        _report_add_kv "$report" "Name" "$asn_name"
-        _report_add_kv "$report" "Description" "$asn_description"
-        _report_add_kv "$report" "Country" "$asn_country"
-        _report_add_kv "$report" "Type" "$asn_type"
-        _report_add_kv "$report" "Announced Prefixes" "$prefixes"
-
-        print_kv " ASN Name" "$asn_name"
-        print_kv " Description" "${asn_description:0:80}..."
-        print_kv " Country" "$asn_country"
-        print_kv " Type" "$asn_type"
-        print_kv " Prefixes" "$prefixes"
-
-        _report_add_raw "$report" "Raw BGPView Response" "$bgp_body"
+    if [[ -n "${IPAPI_IS_API_KEY:-}" ]]; then
+        api_url="${api_url}&key=${IPAPI_IS_API_KEY}"
+        print_info "Authenticated with API key"
     else
-        print_warn " BGPView lookup failed, trying fallback..."
+        print_warn "Running in free tier (limited rate)"
     fi
 
-    # 2. IPInfo.io fallback (good for IP → ASN)
-    if [[ "$query" =~ ^[0-9]+\.[0-9] ]]; then
-        print_info " Querying IPInfo for IP..."
-        local ipinfo=$(curl -s --max-time 12 "https://ipinfo.io/${query}/json")
-        
-        if [[ -n "$ipinfo" ]]; then
-            local org=$(echo "$ipinfo" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("org","N/A"))' 2>/dev/null)
-            local asn=$(echo "$ipinfo" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("asn","N/A"))' 2>/dev/null)
-            
-            _report_add_kv "$report" "Organization" "$org"
-            _report_add_kv "$report" "ASN (from IP)" "$asn"
-            
-            print_kv " Organization" "$org"
-        fi
+    local raw
+    raw=$(curl -s --max-time 20 -H "User-Agent: SentryCLI/2.7" "$api_url")
+
+    if [[ -z "$raw" ]] || ! echo "$raw" | grep -q "{"; then
+        print_alert "Failed to retrieve data from ipapi.is"
+        echo "ERROR: No response from API" > "$report"
+        return 1
     fi
 
-    _report_add "$report" ""
-    _report_add "$report" "**Analysis completed on:** $(date '+%Y-%m-%d %H:%M:%S %Z')"
-    _report_add "$report" "---"
+    print_success "Data received successfully"
 
-    print_success " ASN Lookup completed"
+    # Robust parsing
+    local data
+    data=$(echo "$raw" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    asn = d.get("asn") if isinstance(d.get("asn"), dict) else d
+    loc = d.get("location", {})
+    comp = d.get("company", {})
+    dc = d.get("datacenter", {})
+    ab = d.get("abuse", {}) if isinstance(d.get("abuse"), dict) else {}
+
+    def g(x): return str(x).strip() if x is not None else "N/A"
+
+    print("IP:" + g(d.get("ip")))
+    print("ASN:" + g(asn.get("asn")))
+    print("ORG:" + g(asn.get("org") or comp.get("name") or asn.get("name")))
+    print("DESC:" + g(asn.get("descr") or asn.get("description")))
+    print("COUNTRY:" + g(asn.get("country") or loc.get("country_code")))
+    print("CITY:" + g(loc.get("city")))
+    print("TYPE:" + g(asn.get("type") or comp.get("type")))
+    print("ABUSER:" + g(asn.get("abuser_score") or d.get("abuser_score")))
+    print("ABUSE:" + g(ab.get("email") or asn.get("abuse")))
+    print("CREATED:" + g(asn.get("created")))
+    print("UPDATED:" + g(asn.get("updated")))
+    print("DC:" + g(dc.get("datacenter")))
+    print("IS_DC:" + ("Yes" if d.get("is_datacenter") else "No"))
+    print("VPN:" + ("Yes" if d.get("is_vpn") else "No"))
+    print("TOR:" + ("Yes" if d.get("is_tor") else "No"))
+    print("PROXY:" + ("Yes" if d.get("is_proxy") else "No"))
+    print("RAW_JSON_START")
+    print(json.dumps(d, indent=2))
+except Exception as e:
+    print("ERROR:" + str(e))
+' 2>/dev/null)
+
+    # Extract fields
+    local ip asn org desc country city type abuser abuse created updated dc is_dc vpn tor proxy
+    ip=$(echo "$data" | grep "^IP:" | cut -d: -f2-)
+    asn=$(echo "$data" | grep "^ASN:" | cut -d: -f2-)
+    org=$(echo "$data" | grep "^ORG:" | cut -d: -f2-)
+    desc=$(echo "$data" | grep "^DESC:" | cut -d: -f2-)
+    country=$(echo "$data" | grep "^COUNTRY:" | cut -d: -f2-)
+    city=$(echo "$data" | grep "^CITY:" | cut -d: -f2-)
+    type=$(echo "$data" | grep "^TYPE:" | cut -d: -f2-)
+    abuser=$(echo "$data" | grep "^ABUSER:" | cut -d: -f2-)
+    abuse=$(echo "$data" | grep "^ABUSE:" | cut -d: -f2-)
+    created=$(echo "$data" | grep "^CREATED:" | cut -d: -f2-)
+    updated=$(echo "$data" | grep "^UPDATED:" | cut -d: -f2-)
+    dc=$(echo "$data" | grep "^DC:" | cut -d: -f2-)
+    is_dc=$(echo "$data" | grep "^IS_DC:" | cut -d: -f2-)
+    vpn=$(echo "$data" | grep "^VPN:" | cut -d: -f2-)
+    tor=$(echo "$data" | grep "^TOR:" | cut -d: -f2-)
+    proxy=$(echo "$data" | grep "^PROXY:" | cut -d: -f2-)
+
+    [[ "$asn" != "N/A" ]] && asn="AS${asn}"
+
+    # ── Professional Screen Output ─────────────────────────────────────
+    echo ""
+    echo -e "${BOLD}${WHITE}╔══════════════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${BOLD}${WHITE}║               ASN / IP INTELLIGENCE REPORT                 ║${RESET}"
+    echo -e "${BOLD}${WHITE}╚══════════════════════════════════════════════════════════════╝${RESET}"
+    echo ""
+
+    print_kv " Query"           "$query"
+    [[ "$ip" != "N/A" ]] && print_kv " IP Address"     "$ip"
+    print_kv " ASN"            "$asn"
+    print_kv " Organization"   "$org"
+    [[ "$desc" != "N/A" ]] && print_kv " Description"    "${desc:0:85}..."
+    print_kv " Country"        "$country"
+    [[ "$city" != "N/A" ]] && print_kv " City"           "$city"
+    print_kv " Type"           "$type"
+    print_kv " Abuser Score"   "$abuser"
+    [[ "$abuse" != "N/A" ]] && print_kv " Abuse Contact"  "$abuse"
+    [[ "$is_dc" != "N/A" ]] && print_kv " Datacenter"     "$is_dc (${dc})"
+    [[ "$vpn" != "N/A" ]] && print_kv " VPN"             "$vpn"
+    [[ "$tor" != "N/A" ]] && print_kv " Tor Exit"        "$tor"
+    [[ "$proxy" != "N/A" ]] && print_kv " Proxy"          "$proxy"
+    [[ "$created" != "N/A" ]] && print_kv " ASN Created"   "$created"
+
+    echo ""
+
+    # ── Clean Human-Readable TXT Report ───────────────────────────────
+    {
+        echo "══════════════════════════════════════════════════════════════"
+        echo "              ASN / IP INTELLIGENCE REPORT"
+        echo "══════════════════════════════════════════════════════════════"
+        echo ""
+        echo "Generated On : $(date '+%Y-%m-%d %H:%M:%S %Z')"
+        echo "Query        : $query"
+        echo ""
+        echo "────────────────────── Core Information ──────────────────────"
+        echo "ASN            : $asn"
+        echo "Organization   : $org"
+        echo "Description    : $desc"
+        echo "Country        : $country"
+        echo "City           : $city"
+        echo "Type           : $type"
+        echo ""
+        echo "────────────────────── Threat & Risk ────────────────────────"
+        echo "Abuser Score   : $abuser"
+        echo "Abuse Contact  : $abuse"
+        echo ""
+        echo "────────────────────── Infrastructure ───────────────────────"
+        echo "Is Datacenter  : $is_dc"
+        echo "Datacenter     : $dc"
+        echo "VPN            : $vpn"
+        echo "Tor            : $tor"
+        echo "Proxy          : $proxy"
+        echo ""
+        echo "────────────────────── Timestamps ───────────────────────────"
+        echo "Created        : $created"
+        echo "Updated        : $updated"
+        echo ""
+        echo "══════════════════════════════════════════════════════════════"
+        echo "RAW JSON RESPONSE"
+        echo "══════════════════════════════════════════════════════════════"
+        echo "$raw"
+        echo ""
+        echo "══════════════════════════════════════════════════════════════"
+        echo "Report generated by SentryCLI v2.7"
+    } > "$report"
+
+    return 0
 }
+               
