@@ -21,6 +21,11 @@ source "${SENTRYCLI_ROOT}/modules/hashcheck.sh"
 source "${SENTRYCLI_ROOT}/modules/asnlookup.sh"
 source "${SENTRYCLI_ROOT}/modules/portscan.sh"
 source "${SENTRYCLI_ROOT}/modules/censys.sh"
+source "${SENTRYCLI_ROOT}/modules/webheaders.sh"
+source "${SENTRYCLI_ROOT}/modules/cmsdetect.sh"
+source "${SENTRYCLI_ROOT}/modules/techstack.sh"
+source "${SENTRYCLI_ROOT}/modules/dirbrute.sh"
+source "${SENTRYCLI_ROOT}/modules/robotsanalyzer.sh"
 
 VERSION="2.7"
 CURRENT_MODULE=""
@@ -45,6 +50,11 @@ MODULE_MAP[5]="hashcheck"
 MODULE_MAP[6]="asnlookup"
 MODULE_MAP[7]="portscan"
 MODULE_MAP[8]="censys"
+MODULE_MAP[9]="webheaders"
+MODULE_MAP[10]="cmsdetect"
+MODULE_MAP[11]="techstack"
+MODULE_MAP[12]="dirbrute"
+MODULE_MAP[13]="robotsanalyzer"
 
 declare -A MODULE_NAMES
 MODULE_NAMES[incident]="Incident Response"
@@ -55,6 +65,11 @@ MODULE_NAMES[hashcheck]="Hash Threat Intelligence"
 MODULE_NAMES[asnlookup]="ASN Lookup"
 MODULE_NAMES[portscan]="Advanced Port Scanner"
 MODULE_NAMES[censys]="Censys Reconnaissance"
+MODULE_NAMES[webheaders]="HTTP Security Headers"
+MODULE_NAMES[cmsdetect]="CMS Detection"
+MODULE_NAMES[techstack]="Technology Stack Detector"
+MODULE_NAMES[dirbrute]="Directory Brute Forcer"
+MODULE_NAMES[robotsanalyzer]="Robots.txt & Sensitive Files Analyzer"
 
 # ── Professional Modules List ───────────────────────────────────────────────
 show_modules() {
@@ -79,6 +94,16 @@ show_modules() {
     echo -e " ${CYAN}8.${RESET}  ${WHITE}Censys Reconnaissance${RESET}      ${DIM}Internet-wide exposure search${RESET}"
     echo ""
 
+    echo -e "${DIM}Tip:${RESET} Use ${CYAN}use <number>${RESET} or ${CYAN}use <name>${RESET} | Type ${CYAN}modules${RESET} to see this list again"
+    echo ""
+    echo -e "${WHITE}Web Application Analysis${RESET}"
+    echo -e "${DIM}────────────────────────────────────────────${RESET}"
+    echo -e " ${CYAN}9.${RESET} ${WHITE}HTTP Security Headers${RESET} ${DIM}Security headers analysis${RESET}"
+    echo -e " ${CYAN}10.${RESET} ${WHITE}CMS Detection${RESET} ${DIM}WordPress, Joomla, Drupal etc.${RESET}"
+    echo -e " ${CYAN}11.${RESET} ${WHITE}Technology Stack Detector${RESET} ${DIM}Server, frameworks, CMS${RESET}"
+    echo -e " ${CYAN}12.${RESET} ${WHITE}Directory Brute Forcer${RESET} ${DIM}Hidden directories & files${RESET}"
+    echo -e " ${CYAN}13.${RESET} ${WHITE}Robots.txt Analyzer${RESET} ${DIM}Sensitive paths & files${RESET}"
+    echo ""
     echo -e "${DIM}Tip:${RESET} Use ${CYAN}use <number>${RESET} or ${CYAN}use <name>${RESET} | Type ${CYAN}modules${RESET} to see this list again"
     echo ""
 }
@@ -113,11 +138,62 @@ show_module_help() {
             ;;
         portscan)
             echo -e "${YELLOW}Advanced Port Scanner${RESET}"
-            print_kv " target" "Target IP or domain"
+            echo -e "${DIM}Service, version, and OS detection via nmap.${RESET}"
+            print_kv " target" "Target IP or domain (required)"
+            print_kv " mode"   "Scan mode (advanced, quick, full, stealth)"
+            echo ""
+            echo -e "${WHITE}Available Modes:${RESET}"
+            echo -e "   ${CYAN}advanced${RESET}   → Top 1000 ports + Service + OS detection (Recommended)"
+            echo -e "              ${DIM}nmap -Pn -sV -sC -O --reason --open --top-ports 1000 -T3${RESET}"
+            echo -e "   ${CYAN}quick${RESET}      → Fast scan (Top 200 ports - Quick)"
+            echo -e "              ${DIM}nmap -Pn -sV -sC -O --reason --open --top-ports 200 -T4${RESET}"
+            echo -e "   ${CYAN}full${RESET}       → Full scan (All 65,535 ports - Slow)"
+            echo -e "              ${DIM}nmap -Pn -sV -sC -O --reason --open -p- -T3${RESET}"
+            echo -e "   ${CYAN}stealth${RESET}    → Low detection, stealthier scan (Slower)"
+            echo -e "              ${DIM}nmap -Pn -sV -sC -O --reason --open --top-ports 1000 -T2 --randomize-hosts${RESET}"
+            echo ""
+            echo -e "${DIM}Example: set target 192.168.1.1${RESET}"
+            echo -e "${DIM}Example: set mode quick${RESET}"
             ;;
         censys)
             echo -e "${YELLOW}Censys Reconnaissance${RESET}"
             print_kv " query" "Search query (IP, domain, certificate, etc.)"
+            ;;
+        webheaders)
+            echo -e "${YELLOW}HTTP Security Headers Analyzer${RESET}"
+            echo -e "${DIM}Analyzes important security headers like CSP, HSTS, X-Frame-Options, etc.${RESET}"
+            echo ""
+            print_kv " target" "Target domain or URL (e.g. example.com)"
+            echo ""
+            echo -e "${WHITE}Key Security Headers Checked:${RESET}"
+            echo -e "   ${CYAN}• Strict-Transport-Security (HSTS)${RESET}"
+            echo -e "   ${CYAN}• Content-Security-Policy (CSP)${RESET}"
+            echo -e "   ${CYAN}• X-Frame-Options${RESET}"
+            echo -e "   ${CYAN}• X-Content-Type-Options${RESET}"
+            echo -e "   ${CYAN}• Referrer-Policy${RESET}"
+            echo -e "   ${CYAN}• Permissions-Policy${RESET}"
+            echo -e "   ${CYAN}• X-XSS-Protection${RESET}"
+            echo ""
+            echo -e "${DIM}Example:${RESET}"
+            echo -e "   set target example.com"
+            echo -e "   run"
+            ;;
+    cmsdetect)
+            echo -e "${YELLOW}CMS Detection${RESET}"
+            print_kv " target" "Domain or URL"
+            ;;
+        techstack)
+            echo -e "${YELLOW}Technology Stack Detector${RESET}"
+            print_kv " target" "Domain or URL"
+            ;;
+        dirbrute)
+            echo -e "${YELLOW}Directory Brute Forcer${RESET}"
+            print_kv " target" "Domain or URL"
+            print_kv " wordlist" "Optional custom wordlist path"
+            ;;
+        robotsanalyzer)
+            echo -e "${YELLOW}Robots.txt & Sensitive Files Analyzer${RESET}"
+            print_kv " target" "Domain or URL"
             ;;
         *)
             echo -e "${DIM}No detailed help available yet.${RESET}"
@@ -215,6 +291,11 @@ start_repl() {
                     censys)     run_censys --query "${MODULE_OPTS[query]:-}" ;;
                     log|logintel) run_logintel "${MODULE_OPTS[log-file]:-}" ;;
                     incident|ir)  run_incident ;;
+                    webheaders) run_webheaders "${MODULE_OPTS[target]:-}" ;;
+                    cmsdetect) run_cmsdetect "${MODULE_OPTS[target]:-}" ;;
+                    techstack) run_techstack "${MODULE_OPTS[target]:-}" ;;
+                    dirbrute) run_dirbrute "${MODULE_OPTS[target]:-}" ;;
+                    robotsanalyzer) run_robotsanalyzer "${MODULE_OPTS[target]:-}" ;;
                     *) print_alert "Handler not implemented for this module yet." ;;
                 esac
 
@@ -333,3 +414,4 @@ main() {
 }
 
 main "$@"
+                 
