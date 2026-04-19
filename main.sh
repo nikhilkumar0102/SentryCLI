@@ -33,10 +33,21 @@ source "${SENTRYCLI_ROOT}/modules/subtakeover.sh"
 source "${SENTRYCLI_ROOT}/modules/apidiscover.sh"
 source "${SENTRYCLI_ROOT}/modules/wayback.sh"
 source "${SENTRYCLI_ROOT}/modules/corscheck.sh"
+source "${SENTRYCLI_ROOT}/modules/hostinfo.sh"
+source "${SENTRYCLI_ROOT}/modules/reputation.sh"
 
 VERSION="2.7"
 CURRENT_MODULE=""
 declare -A MODULE_OPTS
+
+# ── Helper: safely clear MODULE_OPTS ────────────────────────────────────────
+# MODULE_OPTS=() cannot be used on a declared -A array under set -e —
+# it tries to convert associative → indexed and throws a fatal error.
+# This function is the ONLY correct way to reset it.
+_reset_opts() {
+    unset MODULE_OPTS
+    declare -gA MODULE_OPTS
+}
 
 cleanup() {
     spinner_stop 2>/dev/null || true
@@ -47,7 +58,7 @@ trap cleanup EXIT INT TERM
 
 print_banner
 
-# ── Module Registry ─────────────────────────────────────────────────────────
+# ── Module Registry ──────────────────────────────────────────────────────────
 declare -A MODULE_MAP
 MODULE_MAP[1]="incident"
 MODULE_MAP[2]="recon"
@@ -69,6 +80,8 @@ MODULE_MAP[17]="subtakeover"
 MODULE_MAP[18]="apidiscover"
 MODULE_MAP[19]="wayback"
 MODULE_MAP[20]="corscheck"
+MODULE_MAP[21]="hostinfo"
+MODULE_MAP[22]="reputation"
 
 declare -A MODULE_NAMES
 MODULE_NAMES[incident]="Incident Response"
@@ -91,51 +104,54 @@ MODULE_NAMES[subtakeover]="Subdomain Takeover Checker"
 MODULE_NAMES[apidiscover]="API Endpoint Discovery"
 MODULE_NAMES[wayback]="Wayback Machine Analyzer"
 MODULE_NAMES[corscheck]="CORS Misconfiguration Checker"
+MODULE_NAMES[hostinfo]="Server Location & Hosting Detector"
+MODULE_NAMES[reputation]="Domain Reputation & Blacklist Checker"
 
-# ── Professional Modules List ───────────────────────────────────────────────
+# ── Module List ──────────────────────────────────────────────────────────────
 show_modules() {
     echo ""
     echo -e "${BOLD}${WHITE}Available Modules${RESET}"
-    echo -e "${CYAN}────────────────────────────────────────────────────────────────────────────────────${RESET}"
+    echo -e "${CYAN}$(printf '%.0s─' {1..80})${RESET}"
     echo ""
 
-    echo -e "${WHITE}Network & Infrastructure${RESET}"
-    echo -e "${DIM}────────────────────────────────────────────${RESET}"
-    echo -e " ${CYAN}1.${RESET}  ${WHITE}Incident Response${RESET}          ${DIM}Live forensic triage${RESET}"
-    echo -e " ${CYAN}2.${RESET}  ${WHITE}Reconnaissance${RESET}             ${DIM}DNS, WHOIS, subdomains${RESET}"
-    echo -e " ${CYAN}6.${RESET}  ${WHITE}ASN Lookup${RESET}                  ${DIM}BGP & ASN intelligence${RESET}"
-    echo -e " ${CYAN}7.${RESET}  ${WHITE}Advanced Port Scanner${RESET}      ${DIM}Service & version detection${RESET}"
+    echo -e "${BOLD}${WHITE}  Network & Infrastructure${RESET}"
+    echo -e "${DIM}  $(printf '%.0s─' {1..60})${RESET}"
+    echo -e "  ${CYAN} 1.${RESET}  ${WHITE}Incident Response${RESET}               ${DIM}Live forensic triage${RESET}"
+    echo -e "  ${CYAN} 2.${RESET}  ${WHITE}Reconnaissance${RESET}                  ${DIM}DNS, WHOIS, subdomains${RESET}"
+    echo -e "  ${CYAN} 6.${RESET}  ${WHITE}ASN Lookup${RESET}                      ${DIM}BGP & ASN intelligence${RESET}"
+    echo -e "  ${CYAN} 7.${RESET}  ${WHITE}Advanced Port Scanner${RESET}           ${DIM}Service & version detection${RESET}"
+    echo -e "  ${CYAN}21.${RESET}  ${WHITE}Server Location & Hosting${RESET}       ${DIM}GeoIP, ISP, Cloud Provider${RESET}"
     echo ""
 
-    echo -e "${WHITE}Security & Threat Intelligence${RESET}"
-    echo -e "${DIM}────────────────────────────────────────────${RESET}"
-    echo -e " ${CYAN}3.${RESET}  ${WHITE}Log Intelligence${RESET}           ${DIM}Brute-force & anomaly detection${RESET}"
-    echo -e " ${CYAN}4.${RESET}  ${WHITE}IP Threat Intelligence${RESET}     ${DIM}AbuseIPDB + GeoIP${RESET}"
-    echo -e " ${CYAN}5.${RESET}  ${WHITE}Hash Threat Intelligence${RESET}   ${DIM}VirusTotal deep analysis${RESET}"
-    echo -e " ${CYAN}8.${RESET}  ${WHITE}Censys Reconnaissance${RESET}      ${DIM}Internet-wide exposure search${RESET}"
+    echo -e "${BOLD}${WHITE}  Security & Threat Intelligence${RESET}"
+    echo -e "${DIM}  $(printf '%.0s─' {1..60})${RESET}"
+    echo -e "  ${CYAN} 3.${RESET}  ${WHITE}Log Intelligence${RESET}                ${DIM}Brute-force & anomaly detection${RESET}"
+    echo -e "  ${CYAN} 4.${RESET}  ${WHITE}IP Threat Intelligence${RESET}          ${DIM}AbuseIPDB + GeoIP${RESET}"
+    echo -e "  ${CYAN} 5.${RESET}  ${WHITE}Hash Threat Intelligence${RESET}         ${DIM}VirusTotal deep analysis${RESET}"
+    echo -e "  ${CYAN} 8.${RESET}  ${WHITE}Censys Reconnaissance${RESET}           ${DIM}Internet-wide exposure search${RESET}"
+    echo -e "  ${CYAN}22.${RESET}  ${WHITE}Domain Reputation Checker${RESET}       ${DIM}Blacklist & threat intel${RESET}"
     echo ""
 
-    echo -e "${WHITE}Web Application Analysis${RESET}"
-    echo -e "${DIM}────────────────────────────────────────────${RESET}"
-    echo -e " ${CYAN}9.${RESET}  ${WHITE}HTTP Security Headers${RESET}      ${DIM}Security headers analysis${RESET}"
-    echo -e " ${CYAN}10.${RESET} ${WHITE}CMS Detection${RESET}              ${DIM}WordPress, Joomla, Drupal etc.${RESET}"
-    echo -e " ${CYAN}11.${RESET} ${WHITE}Technology Stack Detector${RESET}  ${DIM}Server, frameworks, CMS${RESET}"
-    echo -e " ${CYAN}12.${RESET} ${WHITE}Directory Brute Forcer${RESET}     ${DIM}Hidden directories & files${RESET}"
-    echo -e " ${CYAN}13.${RESET} ${WHITE}Robots.txt Analyzer${RESET}        ${DIM}Sensitive paths & files${RESET}"
-    echo -e " ${CYAN}14.${RESET} ${WHITE}WAF Detector${RESET}              ${DIM}Cloudflare, Sucuri, ModSecurity${RESET}"
-    echo -e " ${CYAN}15.${RESET} ${WHITE}SSL/TLS Security Analyzer${RESET} ${DIM}Certificate & cipher analysis${RESET}"
-    echo -e " ${CYAN}16.${RESET} ${WHITE}JS Library Vulnerability Scanner${RESET} ${DIM}Outdated JS libs${RESET}"
-    echo -e " ${CYAN}17.${RESET} ${WHITE}Subdomain Takeover Checker${RESET} ${DIM}Dangling DNS records${RESET}"
-    echo -e " ${CYAN}18.${RESET} ${WHITE}API Endpoint Discovery${RESET}    ${DIM}Swagger, GraphQL, APIs${RESET}"
-    echo -e " ${CYAN}19.${RESET} ${WHITE}Wayback Machine Analyzer${RESET}  ${DIM}Archive exposure check${RESET}"
-    echo -e " ${CYAN}20.${RESET} ${WHITE}CORS Misconfiguration Checker${RESET} ${DIM}Dangerous CORS settings${RESET}"
+    echo -e "${BOLD}${WHITE}  Web Application Analysis${RESET}"
+    echo -e "${DIM}  $(printf '%.0s─' {1..60})${RESET}"
+    echo -e "  ${CYAN} 9.${RESET}  ${WHITE}HTTP Security Headers${RESET}           ${DIM}Security headers analysis${RESET}"
+    echo -e "  ${CYAN}10.${RESET}  ${WHITE}CMS Detection${RESET}                   ${DIM}WordPress, Joomla, Drupal etc.${RESET}"
+    echo -e "  ${CYAN}11.${RESET}  ${WHITE}Technology Stack Detector${RESET}       ${DIM}Server, frameworks, CMS${RESET}"
+    echo -e "  ${CYAN}12.${RESET}  ${WHITE}Directory Brute Forcer${RESET}          ${DIM}Hidden directories & files${RESET}"
+    echo -e "  ${CYAN}13.${RESET}  ${WHITE}Robots.txt Analyzer${RESET}             ${DIM}Sensitive paths & files${RESET}"
+    echo -e "  ${CYAN}14.${RESET}  ${WHITE}WAF Detector${RESET}                    ${DIM}Cloudflare, Akamai, Imperva etc.${RESET}"
+    echo -e "  ${CYAN}15.${RESET}  ${WHITE}SSL/TLS Security Analyzer${RESET}       ${DIM}Certificate & cipher analysis${RESET}"
+    echo -e "  ${CYAN}16.${RESET}  ${WHITE}JS Library Vulnerability Scanner${RESET} ${DIM}Outdated JS libraries${RESET}"
+    echo -e "  ${CYAN}17.${RESET}  ${WHITE}Subdomain Takeover Checker${RESET}      ${DIM}Dangling DNS records${RESET}"
+    echo -e "  ${CYAN}18.${RESET}  ${WHITE}API Endpoint Discovery${RESET}          ${DIM}Swagger, GraphQL, REST APIs${RESET}"
+    echo -e "  ${CYAN}19.${RESET}  ${WHITE}Wayback Machine Analyzer${RESET}        ${DIM}Archive exposure check${RESET}"
+    echo -e "  ${CYAN}20.${RESET}  ${WHITE}CORS Misconfiguration Checker${RESET}   ${DIM}Dangerous CORS settings${RESET}"
     echo ""
-
-    echo -e "${DIM}Tip:${RESET} Use ${CYAN}use <number>${RESET} or ${CYAN}use <name>${RESET} | Type ${CYAN}modules${RESET} to see this list again"
+    echo -e "  ${DIM}Tip: ${RESET}${CYAN}use <number>${RESET} or ${CYAN}use <name>${RESET} to load a module | ${CYAN}modules${RESET} to see this list"
     echo ""
 }
 
-# ── Module Help ─────────────────────────────────────────────────────────────
+# ── Module Help ──────────────────────────────────────────────────────────────
 show_module_help() {
     case "$CURRENT_MODULE" in
         incident|ir)
@@ -167,20 +183,15 @@ show_module_help() {
             echo -e "${YELLOW}Advanced Port Scanner${RESET}"
             echo -e "${DIM}Service, version, and OS detection via nmap.${RESET}"
             print_kv " target" "Target IP or domain (required)"
-            print_kv " mode"   "Scan mode (advanced, quick, full, stealth)"
+            print_kv " mode"   "Scan mode: advanced | quick | full | stealth"
             echo ""
-            echo -e "${WHITE}Available Modes:${RESET}"
-            echo -e "   ${CYAN}advanced${RESET}   → Top 1000 ports + Service + OS detection (Recommended)"
-            echo -e "              ${DIM}nmap -Pn -sV -sC -O --reason --open --top-ports 1000 -T3${RESET}"
-            echo -e "   ${CYAN}quick${RESET}      → Fast scan (Top 200 ports - Quick)"
-            echo -e "              ${DIM}nmap -Pn -sV -sC -O --reason --open --top-ports 200 -T4${RESET}"
-            echo -e "   ${CYAN}full${RESET}       → Full scan (All 65,535 ports - Slow)"
-            echo -e "              ${DIM}nmap -Pn -sV -sC -O --reason --open -p- -T3${RESET}"
-            echo -e "   ${CYAN}stealth${RESET}    → Low detection, stealthier scan (Slower)"
-            echo -e "              ${DIM}nmap -Pn -sV -sC -O --reason --open --top-ports 1000 -T2 --randomize-hosts${RESET}"
+            echo -e "  ${WHITE}Scan Modes:${RESET}"
+            echo -e "   ${CYAN}advanced${RESET}  → Top 1000 ports + Service + OS detection ${DIM}(default)${RESET}"
+            echo -e "   ${CYAN}quick${RESET}     → Top 200 ports, faster scan"
+            echo -e "   ${CYAN}full${RESET}      → All 65,535 ports (slow)"
+            echo -e "   ${CYAN}stealth${RESET}   → Low-noise scan with host randomization"
             echo ""
-            echo -e "${DIM}Example: set target 192.168.1.1${RESET}"
-            echo -e "${DIM}Example: set mode quick${RESET}"
+            echo -e "${DIM}  Example: set target 192.168.1.1 | set mode quick | run${RESET}"
             ;;
         censys)
             echo -e "${YELLOW}Censys Reconnaissance${RESET}"
@@ -188,132 +199,116 @@ show_module_help() {
             ;;
         webheaders)
             echo -e "${YELLOW}HTTP Security Headers Analyzer${RESET}"
-            echo -e "${DIM}Analyzes important security headers like CSP, HSTS, X-Frame-Options, etc.${RESET}"
-            echo ""
-            print_kv " target" "Target domain or URL (e.g. example.com)"
-            echo ""
-            echo -e "${WHITE}Key Security Headers Checked:${RESET}"
-            echo -e "   ${CYAN}• Strict-Transport-Security (HSTS)${RESET}"
-            echo -e "   ${CYAN}• Content-Security-Policy (CSP)${RESET}"
-            echo -e "   ${CYAN}• X-Frame-Options${RESET}"
-            echo -e "   ${CYAN}• X-Content-Type-Options${RESET}"
-            echo -e "   ${CYAN}• Referrer-Policy${RESET}"
-            echo -e "   ${CYAN}• Permissions-Policy${RESET}"
-            echo -e "   ${CYAN}• X-XSS-Protection${RESET}"
-            echo ""
-            echo -e "${DIM}Example: set target example.com${RESET}"
-            echo -e "${DIM}         run${RESET}"
+            echo -e "${DIM}Checks CSP, HSTS, X-Frame-Options, XCTO, Referrer-Policy etc.${RESET}"
+            print_kv " target" "Domain or URL (e.g. example.com)"
+            echo -e "${DIM}  Example: set target example.com | run${RESET}"
             ;;
         cmsdetect)
             echo -e "${YELLOW}CMS Detection${RESET}"
-            echo -e "${DIM}Detects WordPress, Joomla, Drupal and other CMS platforms.${RESET}"
+            echo -e "${DIM}Detects WordPress, Joomla, Drupal, Shopify, Ghost etc.${RESET}"
             print_kv " target" "Domain or URL (required)"
-            echo ""
-            echo -e "${DIM}Example: set target example.com${RESET}"
+            echo -e "${DIM}  Example: set target example.com | run${RESET}"
             ;;
         techstack)
             echo -e "${YELLOW}Technology Stack Detector${RESET}"
-            echo -e "${DIM}Identifies server software, frameworks, CDN, and CMS from HTTP responses.${RESET}"
+            echo -e "${DIM}Identifies server, frameworks, CDN, JS libs from HTTP responses.${RESET}"
             print_kv " target" "Domain or URL (required)"
-            echo ""
-            echo -e "${DIM}Example: set target example.com${RESET}"
+            echo -e "${DIM}  Example: set target example.com | run${RESET}"
             ;;
         dirbrute)
             echo -e "${YELLOW}Directory Brute Forcer${RESET}"
             echo -e "${DIM}Discovers hidden directories and files on web servers.${RESET}"
             print_kv " target"   "Domain or URL (required)"
             print_kv " wordlist" "Path to custom wordlist (optional)"
-            echo ""
-            echo -e "${DIM}Example: set target example.com${RESET}"
-            echo -e "${DIM}         set wordlist /usr/share/wordlists/dirb/common.txt${RESET}"
+            echo -e "${DIM}  Example: set target example.com | run${RESET}"
             ;;
         robotsanalyzer)
             echo -e "${YELLOW}Robots.txt & Sensitive Files Analyzer${RESET}"
-            echo -e "${DIM}Fetches and analyzes robots.txt for exposed paths and sensitive files.${RESET}"
+            echo -e "${DIM}Fetches and analyzes robots.txt for exposed paths.${RESET}"
             print_kv " target" "Domain or URL (required)"
-            echo ""
-            echo -e "${DIM}Example: set target example.com${RESET}"
+            echo -e "${DIM}  Example: set target example.com | run${RESET}"
             ;;
         wafdetect)
             echo -e "${YELLOW}WAF Detector${RESET}"
-            echo -e "${DIM}Detects Web Application Firewalls (Cloudflare, Sucuri, ModSecurity, Akamai, etc.)${RESET}"
+            echo -e "${DIM}Multi-vector detection: headers, cookies, active probes, DNS.${RESET}"
+            print_kv " target" "Domain or URL (e.g. example.com)"
             echo ""
-            print_kv " target" "Target domain or URL (e.g. example.com)"
-            echo ""
-            echo -e "${WHITE}Supported WAFs:${RESET}"
-            echo -e " ${CYAN}•${RESET} Cloudflare"
-            echo -e " ${CYAN}•${RESET} Sucuri CloudProxy"
-            echo -e " ${CYAN}•${RESET} ModSecurity (OWASP)"
-            echo -e " ${CYAN}•${RESET} Akamai"
-            echo -e " ${CYAN}•${RESET} AWS WAF"
-            echo -e " ${CYAN}•${RESET} Imperva / Incapsula"
-            echo -e " ${CYAN}•${RESET} Fastly"
-            echo -e " ${CYAN}•${RESET} Wordfence"
-            echo ""
-            echo -e "${DIM}Example:${RESET}"
-            echo -e " use 14"
-            echo -e " set target example.com"
-            echo -e " run"
+            echo -e "  ${WHITE}Detects:${RESET} Cloudflare, Akamai, Imperva, AWS WAF, Sucuri,"
+            echo -e "           F5 BIG-IP, ModSecurity, Fastly, Azure Front Door,"
+            echo -e "           DataDome, PerimeterX, Wordfence, Barracuda, FortiWeb"
+            echo -e "${DIM}  Example: set target example.com | run${RESET}"
             ;;
-         apidiscover)
-            echo -e "${YELLOW}API Endpoint Discovery${RESET}"
-            echo -e "${DIM}Discovers hidden API endpoints, Swagger UI, GraphQL, and REST APIs.${RESET}"
-            echo ""
-            print_kv " target" "Domain or URL"
-            echo ""
-            echo -e "${WHITE}Common Paths Scanned:${RESET}"
-            echo -e " ${CYAN}•${RESET} /api, /api/v1, /api/v2, /v1, /v2"
-            echo -e " ${CYAN}•${RESET} /graphql, /graphiql"
-            echo -e " ${CYAN}•${RESET} /swagger, /swagger-ui, /openapi.json"
-            echo -e " ${CYAN}•${RESET} /admin/api, /internal, /backend"
-            echo ""
-            echo -e "${DIM}Example:${RESET}"
-            echo -e " use 18"
-            echo -e " set target example.com"
-            echo -e " run"
-            ;;
-         wayback)
-            echo -e "${YELLOW}Wayback Machine Archive Analyzer${RESET}"
-            echo -e "${DIM}Checks historical archives for exposed sensitive files and old backups.${RESET}"
-            echo ""
+        sslanalyze)
+            echo -e "${YELLOW}SSL/TLS Security Analyzer${RESET}"
+            echo -e "${DIM}Certificate details, protocol probes, cipher analysis, vuln checks.${RESET}"
             print_kv " target" "Domain (e.g. example.com)"
             echo ""
-            echo -e "${WHITE}Scans For:${RESET}"
-            echo -e " ${CYAN}•${RESET} .env, wp-config.php, config.php"
-            echo -e " ${CYAN}•${RESET} Backup files (.bak, .old, .sql)"
-            echo -e " ${CYAN}•${RESET} Admin panels and debug files"
-            echo -e " ${CYAN}•${RESET} Exposed sensitive directories"
-            echo ""
-            echo -e "${DIM}Example:${RESET}"
-            echo -e " use 19"
-            echo -e " set target example.com"
-            echo -e " run"
+            echo -e "  ${WHITE}Checks:${RESET} Issuer, expiry, SANs, TLS 1.0/1.1/1.2/1.3 support,"
+            echo -e "          cipher suite, HSTS, POODLE, BEAST, SWEET32, FREAK, RC4"
+            echo -e "${DIM}  Example: set target example.com | run${RESET}"
             ;;
-
-         corscheck)
-            echo -e "${YELLOW}CORS Misconfiguration Checker${RESET}"
-            echo -e "${DIM}Detects dangerous CORS settings that can lead to cross-origin attacks.${RESET}"
-            echo ""
+        jsvulnscan)
+            echo -e "${YELLOW}JS Library Vulnerability Scanner${RESET}"
+            echo -e "${DIM}Detects outdated JS libraries with known CVEs.${RESET}"
+            print_kv " target" "Domain or URL"
+            echo -e "${DIM}  Example: set target example.com | run${RESET}"
+            ;;
+        subtakeover)
+            echo -e "${YELLOW}Subdomain Takeover Checker${RESET}"
+            echo -e "${DIM}Finds dangling DNS records pointing to unclaimed services.${RESET}"
+            print_kv " target" "Domain (e.g. example.com)"
+            echo -e "${DIM}  Example: set target example.com | run${RESET}"
+            ;;
+        apidiscover)
+            echo -e "${YELLOW}API Endpoint Discovery${RESET}"
+            echo -e "${DIM}Discovers API endpoints, Swagger UI, GraphQL, REST APIs.${RESET}"
             print_kv " target" "Domain or URL"
             echo ""
-            echo -e "${WHITE}Checks For:${RESET}"
-            echo -e " ${CYAN}•${RESET} Wildcard Origin (*) with Allow-Credentials: true"
-            echo -e " ${CYAN}•${RESET} Origin reflection"
-            echo -e " ${CYAN}•${RESET} Null origin allowed"
-            echo -e " ${CYAN}•${RESET} Overly permissive Access-Control-Allow-Origin"
+            echo -e "  ${WHITE}Scans:${RESET} /api /api/v1 /api/v2 /graphql /swagger"
+            echo -e "          /openapi.json /admin/api /internal /backend"
+            echo -e "${DIM}  Example: set target example.com | run${RESET}"
+            ;;
+        wayback)
+            echo -e "${YELLOW}Wayback Machine Analyzer${RESET}"
+            echo -e "${DIM}Checks historical archives for exposed sensitive files.${RESET}"
+            print_kv " target" "Domain (e.g. example.com)"
             echo ""
-            echo -e "${DIM}Example:${RESET}"
-            echo -e " use 20"
-            echo -e " set target example.com"
-            echo -e " run"
+            echo -e "  ${WHITE}Looks for:${RESET} .env, wp-config.php, backup files,"
+            echo -e "             admin panels, debug files, old configs"
+            echo -e "${DIM}  Example: set target example.com | run${RESET}"
+            ;;
+        corscheck)
+            echo -e "${YELLOW}CORS Misconfiguration Checker${RESET}"
+            echo -e "${DIM}Detects dangerous CORS settings that allow cross-origin attacks.${RESET}"
+            print_kv " target" "Domain or URL"
+            echo ""
+            echo -e "  ${WHITE}Checks:${RESET} Wildcard origin + credentials, origin reflection,"
+            echo -e "          null origin, overly permissive ACAO header"
+            echo -e "${DIM}  Example: set target example.com | run${RESET}"
+            ;;
+        hostinfo)
+            echo -e "${YELLOW}Server Location & Hosting Detector${RESET}"
+            echo -e "${DIM}Detects city, country, ISP, hosting provider and cloud platform.${RESET}"
+            print_kv " target" "Domain or IP address"
+            echo -e "${DIM}  Example: set target example.com | run${RESET}"
+            ;;
+        reputation)
+            echo -e "${YELLOW}Domain Reputation & Blacklist Checker${RESET}"
+            echo -e "${DIM}Checks domain/IP against VirusTotal, AbuseIPDB, Spamhaus etc.${RESET}"
+            print_kv " target" "Domain or IP address"
+            echo ""
+            echo -e "  ${WHITE}Requires API keys in:${RESET} ${CYAN}config/api_keys.conf${RESET}"
+            echo -e "   ${DIM}VIRUSTOTAL_API_KEY=your_key_here${RESET}"
+            echo -e "   ${DIM}ABUSEIPDB_API_KEY=your_key_here${RESET}"
+            echo -e "${DIM}  Example: set target example.com | run${RESET}"
             ;;
         *)
-            echo -e "${DIM}No detailed help available yet.${RESET}"
+            echo -e "${DIM}No detailed help available for this module.${RESET}"
             ;;
     esac
 }
 
-# ── REPL Core ───────────────────────────────────────────────────────────────
+# ── REPL Core ────────────────────────────────────────────────────────────────
 start_repl() {
     print_info "Interactive REPL ready. Type 'modules' to list available modules."
     echo ""
@@ -328,6 +323,7 @@ start_repl() {
         read -r cmd arg1 arg2 rest
 
         case "$cmd" in
+
             modules|list)
                 show_modules
                 ;;
@@ -351,44 +347,49 @@ start_repl() {
                         techstack|tech|stack)             mod_key="techstack" ;;
                         dirbrute|dir|brute|dirbuster)     mod_key="dirbrute" ;;
                         robotsanalyzer|robots|robots.txt) mod_key="robotsanalyzer" ;;
-                        wafdetect) mod_key="wafdetect" ;;
-                        sslanalyze|ssl) mod_key="sslanalyze" ;;
-                        jsvulnscan|js) mod_key="jsvulnscan" ;;
-                        subtakeover|sub) mod_key="subtakeover" ;;
-                        apidiscover|api) mod_key="apidiscover" ;;
-                        wayback) mod_key="wayback" ;;
-                        corscheck|cors) mod_key="corscheck" ;;
+                        wafdetect|waf)                    mod_key="wafdetect" ;;
+                        sslanalyze|ssl|tls)               mod_key="sslanalyze" ;;
+                        jsvulnscan|js|jsvuln)             mod_key="jsvulnscan" ;;
+                        subtakeover|sub|takeover)         mod_key="subtakeover" ;;
+                        apidiscover|api|apis)             mod_key="apidiscover" ;;
+                        wayback|archive)                  mod_key="wayback" ;;
+                        corscheck|cors)                   mod_key="corscheck" ;;
+                        hostinfo|host|geo)                mod_key="hostinfo" ;;
+                        reputation|reput|rep)             mod_key="reputation" ;;
+                        *)                                mod_key="" ;;
                     esac
                 fi
 
                 if [[ -n "$mod_key" && -n "${MODULE_NAMES[$mod_key]:-}" ]]; then
                     CURRENT_MODULE="$mod_key"
-                    MODULE_OPTS=()
+                    # BUG FIX: MODULE_OPTS=() fails on associative arrays under set -e.
+                    # Must unset then re-declare as associative.
+                    _reset_opts
                     print_success "Module loaded: ${MODULE_NAMES[$mod_key]}"
-                    echo -e "${DIM}Type 'opts' or 'helpmod' to view configuration${RESET}"
+                    echo -e "${DIM}Type 'opts' or 'helpmod' to view options | 'run' to execute${RESET}"
                 else
-                    print_warn "Invalid module. Type 'modules' to see list."
+                    print_warn "Invalid module '${arg1}'. Type 'modules' to see the list."
                 fi
                 ;;
 
             set)
-                if [[ -n "$CURRENT_MODULE" && -n "$arg1" ]]; then
-                    MODULE_OPTS["$arg1"]="${arg2}${rest:+ $rest}"
-                    print_success "Configured: ${arg1} = ${MODULE_OPTS[$arg1]}"
+                if [[ -n "$CURRENT_MODULE" && -n "${arg1:-}" ]]; then
+                    MODULE_OPTS["$arg1"]="${arg2:-}${rest:+ $rest}"
+                    print_success "Set: ${arg1} = ${MODULE_OPTS[$arg1]}"
                 else
-                    print_warn "Load a module first using 'use <number or name>'"
+                    print_warn "Load a module first: use <number or name>"
                 fi
                 ;;
 
             opts|options|"show options")
                 if [[ -n "$CURRENT_MODULE" ]]; then
-                    echo -e "${YELLOW}Current Configuration — ${MODULE_NAMES[$CURRENT_MODULE]}${RESET}"
-                    echo -e "${DIM}────────────────────────────────────────${RESET}"
+                    echo -e "${YELLOW}Configuration — ${MODULE_NAMES[$CURRENT_MODULE]}${RESET}"
+                    echo -e "${DIM}$(printf '%.0s─' {1..40})${RESET}"
                     if [[ ${#MODULE_OPTS[@]} -eq 0 ]]; then
-                        echo -e "  ${DIM}No options configured yet${RESET}"
+                        echo -e "  ${DIM}No options set yet${RESET}"
                     else
                         for k in "${!MODULE_OPTS[@]}"; do
-                            printf "  ${GREEN}%-12s${RESET} = %s\n" "$k" "${MODULE_OPTS[$k]}"
+                            printf "  ${GREEN}%-14s${RESET} = %s\n" "$k" "${MODULE_OPTS[$k]}"
                         done
                     fi
                     echo ""
@@ -406,8 +407,8 @@ start_repl() {
 
                 print_section "Running ${MODULE_NAMES[$CURRENT_MODULE]}"
 
-                # ── IMPORTANT: all web modules called with NO args ─────────
-                # They read MODULE_OPTS internally so nothing is lost in transit
+                # All modules read MODULE_OPTS internally.
+                # Pass target as arg only for modules that accept $1 as fallback.
                 case "$CURRENT_MODULE" in
                     recon)          run_recon "${MODULE_OPTS[target]:-}" ;;
                     ipcheck)        run_ipcheck --ip "${MODULE_OPTS[ip]:-}" ;;
@@ -422,19 +423,21 @@ start_repl() {
                     techstack)      run_techstack ;;
                     dirbrute)       run_dirbrute ;;
                     robotsanalyzer) run_robotsanalyzer ;;
-                    wafdetect)      run_wafdetect "${MODULE_OPTS[target]:-}" ;;
-                    sslanalyze)     run_sslanalyze "${MODULE_OPTS[target]:-}" ;;
-                    jsvulnscan)     run_jsvulnscan "${MODULE_OPTS[target]:-}" ;;
-                    subtakeover)    run_subtakeover "${MODULE_OPTS[target]:-}" ;;
-                    apidiscover)    run_apidiscover "${MODULE_OPTS[target]:-}" ;;
-                    wayback)        run_wayback "${MODULE_OPTS[target]:-}" ;;
-                    corscheck)      run_corscheck "${MODULE_OPTS[target]:-}" ;;
-                    *) print_alert "Handler not implemented for this module yet." ;;
+                    wafdetect)      run_wafdetect ;;
+                    sslanalyze)     run_sslanalyze ;;
+                    jsvulnscan)     run_jsvulnscan ;;
+                    subtakeover)    run_subtakeover ;;
+                    apidiscover)    run_apidiscover ;;
+                    wayback)        run_wayback ;;
+                    corscheck)      run_corscheck ;;
+                    hostinfo)       run_hostinfo ;;
+                    reputation)     run_reputation ;;
+                    *) print_alert "No run handler for module: ${CURRENT_MODULE}" ;;
                 esac
 
                 echo ""
-                print_success "Execution completed."
-                echo -e "${DIM}Returned to main prompt.${RESET}"
+                print_success "Module execution completed."
+                echo -e "${DIM}Back at main prompt. Type 'modules' or 'use <module>'.${RESET}"
                 ;;
 
             runall)
@@ -442,13 +445,12 @@ start_repl() {
                 run_all_modules
                 ;;
 
-            correlate)
-                print_section "SIEM CORRELATION ENGINE"
-                run_correlation
-                ;;
-
             helpmod|"help module")
-                show_module_help
+                if [[ -n "$CURRENT_MODULE" ]]; then
+                    show_module_help
+                else
+                    print_warn "No module loaded. Use 'use <number>' first."
+                fi
                 ;;
 
             help)
@@ -462,87 +464,110 @@ start_repl() {
 
             back|unload)
                 CURRENT_MODULE=""
-                MODULE_OPTS=()
+                # BUG FIX: MODULE_OPTS=() fails on associative arrays under set -e.
+                _reset_opts
                 print_info "Module unloaded."
                 ;;
 
-            exit|quit)
+            exit|quit|q)
                 print_info "Exiting SentryCLI. Goodbye."
                 exit 0
                 ;;
 
-            "") ;;
+            "")
+                # Empty input — do nothing, just show prompt again
+                ;;
+
             *)
-                print_warn "Unknown command. Type 'modules' or 'help'."
+                print_warn "Unknown command '${cmd}'. Type 'help' or 'modules'."
                 ;;
         esac
     done
 }
 
-# ── General Help ────────────────────────────────────────────────────────────
+# ── General Help ─────────────────────────────────────────────────────────────
 show_help() {
-    echo -e "${BOLD}${WHITE}SentryCLI v${VERSION}${RESET}"
-    echo -e "${DIM}Modular Security Operations & Penetration Testing Toolkit${RESET}"
     echo ""
-    echo -e "${BOLD}${WHITE}Core Commands${RESET}"
-    print_kv " modules"           "Show all available modules"
-    print_kv " use <num/name>"    "Load a module"
-    print_kv " set <key> <value>" "Set module option"
-    print_kv " opts"              "Show current configuration"
-    print_kv " run"               "Execute current module"
-    print_kv " runall"            "Run full security sweep"
-    print_kv " help"              "Show this help"
-    print_kv " exit"              "Exit SentryCLI"
+    echo -e "${BOLD}${WHITE}SentryCLI v${VERSION}${RESET}  ${DIM}— Modular Security Operations Toolkit${RESET}"
+    echo -e "${CYAN}$(printf '%.0s─' {1..55})${RESET}"
+    echo ""
+    echo -e "${BOLD}${WHITE}REPL Commands${RESET}"
+    print_kv " modules"            "List all available modules"
+    print_kv " use <num|name>"     "Load a module (e.g. use 9 | use ssl)"
+    print_kv " set <key> <value>"  "Set a module option (e.g. set target google.com)"
+    print_kv " opts"               "Show current module options + help"
+    print_kv " run"                "Execute the loaded module"
+    print_kv " helpmod"            "Show detailed help for loaded module"
+    print_kv " back"               "Unload current module"
+    print_kv " clear"              "Clear terminal and show banner"
+    print_kv " runall"             "Run full security sweep"
+    print_kv " help"               "Show this help"
+    print_kv " exit"               "Exit SentryCLI"
+    echo ""
+    echo -e "${DIM}  Quick example:${RESET}"
+    echo -e "   ${CYAN}use 15${RESET}               → Load SSL/TLS Analyzer"
+    echo -e "   ${CYAN}set target example.com${RESET} → Set the target"
+    echo -e "   ${CYAN}run${RESET}                  → Execute scan"
     echo ""
 }
 
-# ── Legacy Functions (kept for compatibility) ───────────────────────────────
-show_menu() {
-    echo -e " ${BOLD}${WHITE}MAIN MENU${RESET}"
-    echo ""
-    echo -e " ${CYAN}[1]${RESET} Incident Response"
-    echo -e " ${CYAN}[2]${RESET} Reconnaissance"
-    echo -e " ${CYAN}[3]${RESET} Log Intelligence"
-    echo -e " ${CYAN}[4]${RESET} IP Threat Intelligence"
-    echo -e " ${CYAN}[5]${RESET} Hash Threat Intelligence"
-    echo -e " ${CYAN}[6]${RESET} ASN Lookup"
-    echo -e " ${CYAN}[7]${RESET} Advanced Port Scanner"
-    echo -e " ${CYAN}[8]${RESET} Censys Reconnaissance"
-    echo -e " ${CYAN}[0]${RESET} Exit"
-    echo ""
-    echo -ne " ${CYAN}${BOLD}Select option: ${RESET}"
-    read -r choice
-    # ... (You can keep your old menu logic here if needed)
-}
-
+# ── Full Sweep ────────────────────────────────────────────────────────────────
 run_all_modules() {
-    print_section "FULL SECURITY SWEEP"
-    run_logintel
-    run_incident
-    run_recon
-    # Add others as needed
-    log_success "MAIN" "Full sweep completed"
+    local sweep_target="${MODULE_OPTS[target]:-}"
+    if [[ -z "$sweep_target" ]]; then
+        echo -ne "${CYAN}Enter target for full sweep (domain or IP): ${RESET}"
+        read -r sweep_target
+    fi
+    [[ -z "$sweep_target" ]] && { print_alert "No target. Sweep aborted."; return 1; }
+
+    print_info "Full sweep target: ${sweep_target}"
+    echo ""
+
+    run_recon    "$sweep_target"
+    run_webheaders
+    run_wafdetect
+    run_sslanalyze
+    run_cmsdetect
+    run_techstack
+    run_corscheck
+    run_hostinfo
+
+    log_success "MAIN" "Full security sweep completed for $sweep_target"
+    print_success "Full sweep completed!"
 }
 
+# ── Argument Parser ───────────────────────────────────────────────────────────
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --menu) show_menu; exit 0 ;;
-            --version|-v) echo "SentryCLI v${VERSION}"; exit 0 ;;
-            --help|-h) show_help; exit 0 ;;
-            *) print_warn "Unknown argument. Starting REPL..." ;;
+            --version|-v)
+                echo "SentryCLI v${VERSION}"
+                exit 0
+                ;;
+            --help|-h)
+                show_help
+                exit 0
+                ;;
+            --menu)
+                show_modules
+                exit 0
+                ;;
+            *)
+                print_warn "Unknown argument: $1. Starting REPL..."
+                ;;
         esac
         shift
     done
     start_repl
 }
 
-# ── Entry Point ─────────────────────────────────────────────────────────────
+# ── Entry Point ───────────────────────────────────────────────────────────────
 main() {
     mkdir -p "${SENTRYCLI_ROOT}/reports"
     chmod 600 "${SENTRYCLI_ROOT}/config/api_keys.conf" 2>/dev/null || true
     log_session_start "MAIN"
-    log_info "MAIN" "SentryCLI v${VERSION} started"
+    log_info "MAIN" "SentryCLI v${VERSION} started — PID:$$ USER:$(whoami)"
+    # BUG FIX: Original main() never called parse_args — REPL was never launched.
     parse_args "$@"
 }
 
