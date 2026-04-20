@@ -35,18 +35,26 @@ source "${SENTRYCLI_ROOT}/modules/wayback.sh"
 source "${SENTRYCLI_ROOT}/modules/corscheck.sh"
 source "${SENTRYCLI_ROOT}/modules/hostinfo.sh"
 source "${SENTRYCLI_ROOT}/modules/reputation.sh"
+source "${SENTRYCLI_ROOT}/modules/emailbreach.sh"
 
 VERSION="2.7"
 CURRENT_MODULE=""
 declare -A MODULE_OPTS
 
 # ── Helper: safely clear MODULE_OPTS ────────────────────────────────────────
-# MODULE_OPTS=() cannot be used on a declared -A array under set -e —
-# it tries to convert associative → indexed and throws a fatal error.
-# This function is the ONLY correct way to reset it.
+# THREE patterns that all fail under set -euo pipefail:
+#   MODULE_OPTS=()          → "cannot convert associative to indexed array"
+#   unset MODULE_OPTS       → then any ${MODULE_OPTS[*]} = "unbound variable"
+#   unset + declare -gA     → declare -g inside a function doesn't propagate
+#                              reliably in all bash versions, leaving it unbound
+#
+# CORRECT fix: never unset — just delete all existing keys by iterating.
+# The array stays declared so set -u never triggers on any subsequent access.
 _reset_opts() {
-    unset MODULE_OPTS
-    declare -gA MODULE_OPTS
+    local key
+    for key in "${!MODULE_OPTS[@]}"; do
+        unset "MODULE_OPTS[$key]"
+    done 2>/dev/null || true
 }
 
 cleanup() {
@@ -82,6 +90,7 @@ MODULE_MAP[19]="wayback"
 MODULE_MAP[20]="corscheck"
 MODULE_MAP[21]="hostinfo"
 MODULE_MAP[22]="reputation"
+MODULE_MAP[23]="emailbreach"
 
 declare -A MODULE_NAMES
 MODULE_NAMES[incident]="Incident Response"
@@ -106,6 +115,7 @@ MODULE_NAMES[wayback]="Wayback Machine Analyzer"
 MODULE_NAMES[corscheck]="CORS Misconfiguration Checker"
 MODULE_NAMES[hostinfo]="Server Location & Hosting Detector"
 MODULE_NAMES[reputation]="Domain Reputation & Blacklist Checker"
+MODULE_NAMES[emailbreach]="Email Harvester & Breach Checker"
 
 # ── Module List ──────────────────────────────────────────────────────────────
 show_modules() {
@@ -130,6 +140,7 @@ show_modules() {
     echo -e "  ${CYAN} 5.${RESET}  ${WHITE}Hash Threat Intelligence${RESET}         ${DIM}VirusTotal deep analysis${RESET}"
     echo -e "  ${CYAN} 8.${RESET}  ${WHITE}Censys Reconnaissance${RESET}           ${DIM}Internet-wide exposure search${RESET}"
     echo -e "  ${CYAN}22.${RESET}  ${WHITE}Domain Reputation Checker${RESET}       ${DIM}Blacklist & threat intel${RESET}"
+    echo -e "  ${CYAN}23.${RESET}  ${WHITE}Email Harvester & Breach Check${RESET}  ${DIM}Email harvest & breach lookup${RESET}"
     echo ""
 
     echo -e "${BOLD}${WHITE}  Web Application Analysis${RESET}"
@@ -169,11 +180,39 @@ show_module_help() {
             ;;
         ipcheck)
             echo -e "${YELLOW}IP Threat Intelligence${RESET}"
-            print_kv " ip" "IPv4 address to analyze"
+            echo -e "${DIM}  AbuseIPDB confidence score, GeoIP, proxy/VPN/Tor detection.${RESET}"
+            echo ""
+            print_kv " ip" "IPv4 address to analyze (e.g. 1.1.1.1)"
+            echo ""
+            local _conf="${SENTRYCLI_ROOT}/config/api_keys.conf"
+            [[ -f "$_conf" ]] && source "$_conf" 2>/dev/null || true
+            echo -e "  ${BOLD}${WHITE}API Key Status${RESET}"
+            echo -e "  ${DIM}$(printf '%.0s─' {1..44})${RESET}"
+            if [[ -n "${ABUSEIPDB_API_KEY:-}" ]]; then
+                printf "  ${GREEN}✔${RESET}  %-22s ${GREEN}Configured${RESET}\n" "AbuseIPDB"
+            else
+                printf "  ${RED}✘${RESET}  %-22s ${RED}Not set${RESET}  ${DIM}(required for threat intel)${RESET}\n" "AbuseIPDB"
+            fi
+            echo ""
+            echo -e "${DIM}  Example: set ip 8.8.8.8 | run${RESET}"
             ;;
         hashcheck)
             echo -e "${YELLOW}Hash Threat Intelligence${RESET}"
-            print_kv " hash" "File hash (MD5/SHA1/SHA256/SHA512)"
+            echo -e "${DIM}  VirusTotal deep analysis — malware, vendor detections, file info.${RESET}"
+            echo ""
+            print_kv " hash" "File hash — MD5 / SHA1 / SHA256 / SHA512"
+            echo ""
+            local _conf="${SENTRYCLI_ROOT}/config/api_keys.conf"
+            [[ -f "$_conf" ]] && source "$_conf" 2>/dev/null || true
+            echo -e "  ${BOLD}${WHITE}API Key Status${RESET}"
+            echo -e "  ${DIM}$(printf '%.0s─' {1..44})${RESET}"
+            if [[ -n "${VIRUSTOTAL_API_KEY:-}" ]]; then
+                printf "  ${GREEN}✔${RESET}  %-22s ${GREEN}Configured${RESET}\n" "VirusTotal"
+            else
+                printf "  ${RED}✘${RESET}  %-22s ${RED}Not set${RESET}  ${DIM}(required)${RESET}\n" "VirusTotal"
+            fi
+            echo ""
+            echo -e "${DIM}  Example: set hash d41d8cd98f00b204e9800998ecf8427e | run${RESET}"
             ;;
         asnlookup)
             echo -e "${YELLOW}ASN Lookup${RESET}"
@@ -195,7 +234,21 @@ show_module_help() {
             ;;
         censys)
             echo -e "${YELLOW}Censys Reconnaissance${RESET}"
-            print_kv " query" "Search query (IP, domain, certificate, etc.)"
+            echo -e "${DIM}  Internet-wide exposure search — banners, certs, open ports.${RESET}"
+            echo ""
+            print_kv " query" "IP, domain, or certificate query"
+            echo ""
+            local _conf="${SENTRYCLI_ROOT}/config/api_keys.conf"
+            [[ -f "$_conf" ]] && source "$_conf" 2>/dev/null || true
+            echo -e "  ${BOLD}${WHITE}API Key Status${RESET}"
+            echo -e "  ${DIM}$(printf '%.0s─' {1..44})${RESET}"
+            if [[ -n "${CENSYS_API_KEY:-}" ]]; then
+                printf "  ${GREEN}✔${RESET}  %-22s ${GREEN}Configured${RESET}\n" "Censys"
+            else
+                printf "  ${RED}✘${RESET}  %-22s ${RED}Not set${RESET}  ${DIM}(required)${RESET}\n" "Censys"
+            fi
+            echo ""
+            echo -e "${DIM}  Example: set query 8.8.8.8 | run${RESET}"
             ;;
         webheaders)
             echo -e "${YELLOW}HTTP Security Headers Analyzer${RESET}"
@@ -294,13 +347,46 @@ show_module_help() {
             ;;
         reputation)
             echo -e "${YELLOW}Domain Reputation & Blacklist Checker${RESET}"
-            echo -e "${DIM}Checks domain/IP against VirusTotal, AbuseIPDB, Spamhaus etc.${RESET}"
-            print_kv " target" "Domain or IP address"
+            echo -e "${DIM}  Checks domain/IP against VirusTotal, AbuseIPDB, Spamhaus and DNS blacklists.${RESET}"
             echo ""
-            echo -e "  ${WHITE}Requires API keys in:${RESET} ${CYAN}config/api_keys.conf${RESET}"
-            echo -e "   ${DIM}VIRUSTOTAL_API_KEY=your_key_here${RESET}"
-            echo -e "   ${DIM}ABUSEIPDB_API_KEY=your_key_here${RESET}"
+            print_kv " target" "Domain or IP address (e.g. example.com)"
+            echo ""
+            local _conf="${SENTRYCLI_ROOT}/config/api_keys.conf"
+            [[ -f "$_conf" ]] && source "$_conf" 2>/dev/null || true
+            echo -e "  ${BOLD}${WHITE}API Key Status${RESET}"
+            echo -e "  ${DIM}$(printf '%.0s─' {1..44})${RESET}"
+            _key_status() {
+                local label="$1" val="$2"
+                if [[ -n "$val" ]]; then
+                    printf "  ${GREEN}✔${RESET}  %-22s ${GREEN}Configured${RESET}\n" "$label"
+                else
+                    printf "  ${RED}✘${RESET}  %-22s ${RED}Not set${RESET}  ${DIM}(optional)${RESET}\n" "$label"
+                fi
+            }
+            _key_status "VirusTotal"  "${VIRUSTOTAL_API_KEY:-}"
+            _key_status "AbuseIPDB"   "${ABUSEIPDB_API_KEY:-}"
+            _key_status "Censys"      "${CENSYS_API_KEY:-}"
+            _key_status "Shodan"      "${SHODAN_API_KEY:-}"
+            echo ""
+            if [[ ! -f "$_conf" ]]; then
+                echo -e "  ${YELLOW}  ⚠${RESET}  ${DIM}Config not found:${RESET} ${CYAN}config/api_keys.conf${RESET}"
+                echo -e "     ${DIM}Create it and add keys to enable threat intel lookups.${RESET}"
+            else
+                echo -e "  ${DIM}  Keys loaded from:${RESET} ${CYAN}config/api_keys.conf${RESET}"
+            fi
+            echo ""
             echo -e "${DIM}  Example: set target example.com | run${RESET}"
+            ;;
+        emailbreach)
+            echo -e "${YELLOW}Email Harvester & Breach Check${RESET}"
+            echo -e "${DIM}Harvests common emails and checks them against known data breaches.${RESET}"
+            echo ""
+            echo -e "${WHITE}Options:${RESET}"
+            print_kv " target" "Domain to harvest emails from (required)"
+            echo ""
+            echo -e "${WHITE}Examples:${RESET}"
+            echo -e "   ${CYAN}set target example.com${RESET}"
+            echo -e "   ${CYAN}set target company.com${RESET}"
             ;;
         *)
             echo -e "${DIM}No detailed help available for this module.${RESET}"
@@ -356,14 +442,13 @@ start_repl() {
                         corscheck|cors)                   mod_key="corscheck" ;;
                         hostinfo|host|geo)                mod_key="hostinfo" ;;
                         reputation|reput|rep)             mod_key="reputation" ;;
+                        emailbreach|breach|email)         mod_key="emailbreach" ;;  
                         *)                                mod_key="" ;;
                     esac
                 fi
 
                 if [[ -n "$mod_key" && -n "${MODULE_NAMES[$mod_key]:-}" ]]; then
                     CURRENT_MODULE="$mod_key"
-                    # BUG FIX: MODULE_OPTS=() fails on associative arrays under set -e.
-                    # Must unset then re-declare as associative.
                     _reset_opts
                     print_success "Module loaded: ${MODULE_NAMES[$mod_key]}"
                     echo -e "${DIM}Type 'opts' or 'helpmod' to view options | 'run' to execute${RESET}"
@@ -385,13 +470,12 @@ start_repl() {
                 if [[ -n "$CURRENT_MODULE" ]]; then
                     echo -e "${YELLOW}Configuration — ${MODULE_NAMES[$CURRENT_MODULE]}${RESET}"
                     echo -e "${DIM}$(printf '%.0s─' {1..40})${RESET}"
-                    if [[ ${#MODULE_OPTS[@]} -eq 0 ]]; then
-                        echo -e "  ${DIM}No options set yet${RESET}"
-                    else
-                        for k in "${!MODULE_OPTS[@]}"; do
-                            printf "  ${GREEN}%-14s${RESET} = %s\n" "$k" "${MODULE_OPTS[$k]}"
-                        done
-                    fi
+                    local _has_opts=0
+                    for k in "${!MODULE_OPTS[@]}"; do
+                        printf "  ${GREEN}%-14s${RESET} = %s\n" "$k" "${MODULE_OPTS[$k]}"
+                        _has_opts=1
+                    done
+                    [[ $_has_opts -eq 0 ]] && echo -e "  ${DIM}No options set yet${RESET}"
                     echo ""
                     show_module_help
                 else
@@ -407,8 +491,7 @@ start_repl() {
 
                 print_section "Running ${MODULE_NAMES[$CURRENT_MODULE]}"
 
-                # All modules read MODULE_OPTS internally.
-                # Pass target as arg only for modules that accept $1 as fallback.
+                # All modules read MODULE_OPTS internally — called with no args.
                 case "$CURRENT_MODULE" in
                     recon)          run_recon "${MODULE_OPTS[target]:-}" ;;
                     ipcheck)        run_ipcheck --ip "${MODULE_OPTS[ip]:-}" ;;
@@ -432,6 +515,7 @@ start_repl() {
                     corscheck)      run_corscheck ;;
                     hostinfo)       run_hostinfo ;;
                     reputation)     run_reputation ;;
+                    emailbreach)    run_emailbreach ;;  
                     *) print_alert "No run handler for module: ${CURRENT_MODULE}" ;;
                 esac
 
@@ -464,7 +548,6 @@ start_repl() {
 
             back|unload)
                 CURRENT_MODULE=""
-                # BUG FIX: MODULE_OPTS=() fails on associative arrays under set -e.
                 _reset_opts
                 print_info "Module unloaded."
                 ;;
@@ -475,7 +558,7 @@ start_repl() {
                 ;;
 
             "")
-                # Empty input — do nothing, just show prompt again
+                # Empty input — do nothing
                 ;;
 
             *)
@@ -505,7 +588,7 @@ show_help() {
     print_kv " exit"               "Exit SentryCLI"
     echo ""
     echo -e "${DIM}  Quick example:${RESET}"
-    echo -e "   ${CYAN}use 15${RESET}               → Load SSL/TLS Analyzer"
+    echo -e "   ${CYAN}use 23${RESET}               → Load Email Harvester"
     echo -e "   ${CYAN}set target example.com${RESET} → Set the target"
     echo -e "   ${CYAN}run${RESET}                  → Execute scan"
     echo ""
@@ -567,7 +650,6 @@ main() {
     chmod 600 "${SENTRYCLI_ROOT}/config/api_keys.conf" 2>/dev/null || true
     log_session_start "MAIN"
     log_info "MAIN" "SentryCLI v${VERSION} started — PID:$$ USER:$(whoami)"
-    # BUG FIX: Original main() never called parse_args — REPL was never launched.
     parse_args "$@"
 }
 
